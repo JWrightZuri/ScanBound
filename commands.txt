@@ -1,0 +1,9 @@
+pyside6-rcc -o resource.py resource.qrc
+
+pyuic6.exe .\main_window.ui -o .\main_window_ui.py
+
+As admin
+ powershell Set-ExecutionPolicy RemoteSigned
+
+ In main_window_ui.py
+ from static import resource_rc  

@@ -1,0 +1,3 @@
+objectName,type,x1,y1,dx,dy,file,label,scale
+<ui.PyQtImageViewer.QtImageViewer.RectROI object at 0x000001C3B67E63F0>,RectROI,268.6698305,227.9412429,19.90146893,21.05853107,area10001_Z.jpg,9AP (None),0.078125
+<ui.PyQtImageViewer.QtImageViewer.RectROI object at 0x000001C3B67E6210>,RectROI,291.8110734,176.799096,7.868022599,8.099435028,area10001_Z.jpg,CO,0.078125
