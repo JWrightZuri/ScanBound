@@ -95,7 +95,11 @@
           </spacer>
          </item>
          <item row="5" column="0">
-          <widget class="QTextBrowser" name="textBrowser"/>
+          <widget class="QTextBrowser" name="textBrowser">
+           <property name="contextMenuPolicy">
+            <enum>Qt::NoContextMenu</enum>
+           </property>
+          </widget>
          </item>
          <item row="4" column="0">
           <widget class="QLabel" name="label_4">
@@ -281,14 +285,14 @@
             <item>
              <widget class="QPushButton" name="pushButton_14">
               <property name="toolTip">
-               <string>Circle/Ellipse Mode</string>
+               <string>Line Segment Mode</string>
               </property>
               <property name="text">
                <string/>
               </property>
               <property name="icon">
                <iconset resource="../../static/resource.qrc">
-                <normaloff>:/icons/icons/droplet.svg</normaloff>:/icons/icons/droplet.svg</iconset>
+                <normaloff>:/icons/icons/trending-up.svg</normaloff>:/icons/icons/trending-up.svg</iconset>
               </property>
              </widget>
             </item>
@@ -550,7 +554,7 @@
             <item>
              <widget class="QPushButton" name="pushButton_15">
               <property name="text">
-               <string>Export in other formats</string>
+               <string>Export Results to CSV</string>
               </property>
              </widget>
             </item>

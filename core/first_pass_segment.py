@@ -100,8 +100,8 @@ def run_first_pass_segment(image, vacancy_detection=False, feature_properties=No
         # print(best_idx)
         if dists[best_idx] < 1.0:
             best_label = feature_labels[best_idx]
-            if  best_label == '9AP (S)' or best_label == '9AP (R)':
-                best_label = '9AP (None)'
+            if  best_label == '9AP (S)' or best_label == '9AP (R)' or best_label == '9AP (None)':
+                best_label = '9AP'
             bin_centroids[best_label].append(props[idx].centroid)
             bin_indices[best_label].append(idx)
         else:

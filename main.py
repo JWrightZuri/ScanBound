@@ -1,3 +1,8 @@
+import six.moves
+import dateutil.tz
+import dateutil.rrule
+# now safe to import PySide6 and everything else
+
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QMenu
 from PyQt6.QtGui import QAction, QTransform, QIcon
 from PyQt6.QtCore import Qt, QTimer, QElapsedTimer
@@ -48,7 +53,7 @@ class MyWindow(QMainWindow):
             self.IP1_btn: IP1,
             self.computerVision_btn: computerVision,
         }
-        ## ============================================
+        ## ============================================ 
         ## Show home window when starting app
         ## ==============================u==============
         self.show_home_window()
@@ -211,4 +216,7 @@ if __name__ == '__main__':
     
     sys.exit(app.exec())
 
-    ##  pyside6-rcc .\static\resource.qrc -o .\static\resource_rc.py      
+    ##  .\spm-venv\Lib\site-packages\PySide6\rcc.exe .\static\resource.qrc -g python -o .\static\resource_rc.py
+    ## pyside6-rcc -o resource.py resource.qrc      
+    ## pyuic6.exe .\main_window.ui -o .\main_window_ui.py  
+    ## pyuic6.exe .\ImageLabeling.ui -o .\ImageLabeling_ui.py   

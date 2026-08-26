@@ -1,3 +1,4 @@
+import pandas as pd
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QInputDialog, QTreeWidgetItem, QListWidgetItem, QApplication
 import PyQt6.QtGui as QtGui
 import PyQt6.QtCore as QtCore
@@ -9,12 +10,12 @@ import os
 from ui.PyQtImageViewer.QtImageViewer import QtImageViewer
 import numpy as np
 import csv
-import pandas as pd
 from core.first_pass_segment import run_first_pass_segment
 from core.second_pass_segment import run_second_pass_segment
 from skimage.io import imread
 import matplotlib.pyplot as plt
 from PyQt6.QtGui import QColor
+import scipy.stats as stats
 
 # pyuic6.exe .\ImageLabeling.ui -o .\ImageLabeling_ui.py
 class ImageLabeling(QWidget):
@@ -71,14 +72,16 @@ class ImageLabeling(QWidget):
         self.ui.pushButton_7.clicked.connect(self.activate_bounding_box_mode)
         self.ui.pushButton_8.clicked.connect(self.activate_vector_mode)
         self.ui.pushButton_9.clicked.connect(self.activate_point_mode)
+        self.ui.pushButton_14.clicked.connect(self.activate_line_segment_mode)
         self.ui.pushButton_2.clicked.connect(self.setScale)
         self.ui.pushButton_5.clicked.connect(self.load_annotations)
         self.ui.pushButton_3.clicked.connect(self.save_annotations)
         self.ui.pushButton_12.clicked.connect(self.clearAnnotations)
         self.ui.pushButton_6.clicked.connect(self.runAutoSegment)
+        self.ui.pushButton_15.clicked.connect(self.saveLabelClips)
         self.ui.pushButton_16.clicked.connect(self.clearActivityLog)
         self.ui.pushButton_18.clicked.connect(self.collectSymmetryVector)
-        self.ui.pushButton_19.clicked.connect(self.get_vector_angles_within_9AP)
+        self.ui.pushButton_19.clicked.connect(self.showResults)
         self.ui.radioButton.clicked.connect(self.toggleAutoVector)
         self.ui.pushButton_21.setVisible(False)  # Hide the GNR button unless GNR tag is active for a label
         self.ui.pushButton_21.clicked.connect(self.runGNRSegmentation)
@@ -110,7 +113,7 @@ class ImageLabeling(QWidget):
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
         # Auto load data (temporary)
-        # self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\PdGaA(111)_Pd1_CX3-2\20240420_PdGaA111_279a_5min_RT_RT_120C_10min_148C_10min\saved_output")
+        self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\GNR_files\20260716_AuMica_694a_44974_44980_44981\saved_output")
         self.autoVector = False
         self.colorList = [
         QColor("#D81B60"),       # Custom color (hex code)
@@ -182,6 +185,7 @@ class ImageLabeling(QWidget):
     def updateBrowserText(self, text):
         self.browserText.append(text)
         self.ui.textBrowser.setText('\n'.join(self.browserText))
+        self.ui.textBrowser.verticalScrollBar().setValue(self.ui.textBrowser.verticalScrollBar().maximum())  # Scroll to the bottom
 
     def load_images(self):
         for path in self.image_paths:
@@ -203,7 +207,6 @@ class ImageLabeling(QWidget):
             viewer.leftMouseButtonReleased.connect(handleLeftClick)
             viewer.roiList.connect(self.roiUpdate)
             viewer.roiSelected.connect(self.roiSelection)
-
             self.ui.stackedWidget.addWidget(viewer)
             self.ui.label_2.setText("Press the box button to draw bounding boxes on the image")
 
@@ -216,8 +219,11 @@ class ImageLabeling(QWidget):
         self.current_viewer = self.ui.stackedWidget.currentWidget()
         self.current_viewer._labelList = self.labelList
         self.labelTextDisplay(os.path.basename(self.image_paths[selected_index]))
-        if self.metadata_dict:
-            self.autoSetScale()
+        # if self.metadata_dict:
+        self.autoSetScale()
+        # else:
+        #     self.setScale()
+        #     self.ui.label_5.setText("Scale: No metadata available, set manually.")
         # Maintaining the active mode while switching images
         if self.getActiveMode == 'Zoom':
             self.activate_zoom_mode()
@@ -227,6 +233,8 @@ class ImageLabeling(QWidget):
             self.activate_vector_mode()
         if self.getActiveMode == 'Point':
             self.activate_point_mode()
+        if self.getActiveMode == 'LineSegment':
+            self.activate_line_segment_mode()
 
     def roiSelection(self, roi):
         """
@@ -234,12 +242,21 @@ class ImageLabeling(QWidget):
         :param roi: The selected ROI item.
         """
         self.selected_roi = roi
+        # Show all stored information for the ROI that was clicked.
         # When a ROI is selected, update the label selection to match its label in annotations_df
         label = None
         if self.annotations_df is not None and not self.annotations_df.empty:
-            match = self.annotations_df[self.annotations_df['objectName'] == roi[0]]
-            if not match.empty and 'label' in match.columns:
-                label = match.iloc[0]['label']
+            selected_roi = self.annotations_df[self.annotations_df['objectName'] == roi[0]]
+            if not selected_roi.empty and 'label' in selected_roi.columns:
+                label = selected_roi.iloc[0]['label']
+        # print(f"Clicked ROI: {selected_roi}, associated label: {label}")
+        # print(selected_roi.iloc[0]['type'])
+        if selected_roi.iloc[0]['type'] == 'LineSegmentROI':
+            print("Loop for updatebrowsertext")
+            segLength, r_squared, linearity = self.computeLineSegLength(selected_roi)
+            self.updateBrowserText(f"Selected segment stats: \n L={segLength:.2f} nm, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
+
+
         # Find the label in listWidget_2 and select it, or select "Empty Label" if not found
         label_found = False
         for i in range(self.ui.listWidget_2.count()):
@@ -273,6 +290,7 @@ class ImageLabeling(QWidget):
         self.current_viewer.drawROI = None
         # self.ui.pushButton_11.setStyleSheet("background-color: #ADD8E6;")
         self.active_button_color(self.ui.pushButton_11)
+        self.current_viewer.setROIsAreMovable()  # Allow moving ROIs in selection mode
 
     def activate_zoom_mode(self):
         # Check if the current viewer has a regionZoomButton attribute set
@@ -287,6 +305,7 @@ class ImageLabeling(QWidget):
         self.getActiveMode = 'Zoom'
         self.current_viewer.drawROI = None
         self.active_button_color(self.ui.pushButton_10)
+        self.current_viewer.setROIsAreMovable() 
 
     def activate_bounding_box_mode(self):
         # Check if the current viewer has a regionZoomButton attribute set
@@ -306,7 +325,8 @@ class ImageLabeling(QWidget):
         self.current_viewer.drawROI = "RectROI"  # Set to "Rect" for rectangle drawing
         self.active_button_color(self.ui.pushButton_7)
         # self.current_viewer.roiAdded.connect(roiOutput)
-   
+        self.current_viewer.setROIsAreMovable() 
+
     def activate_vector_mode(self):
         # Check if the current viewer has a regionZoomButton attribute set
         if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
@@ -318,9 +338,10 @@ class ImageLabeling(QWidget):
         self.ui.label_2.setText("Vector mode activated. Draw a vector on the image.")
         # self.updateBrowserText(f"Vector mode activated.")
         self.getActiveMode = 'Vector'
-        self.current_viewer.drawROI = "LineROI"  # Set to "Line" for vector drawing
+        self.current_viewer.drawROI = "VectorROI"  # Set to "Line" for vector drawing
         self.current_viewer._currentLabel = 'Empty Label'  # Default label for new vectors
         self.active_button_color(self.ui.pushButton_8)
+        self.current_viewer.setROIsAreMovable() 
 
     def activate_point_mode(self):
         # Check if the current viewer has a regionZoomButton attribute set
@@ -335,13 +356,37 @@ class ImageLabeling(QWidget):
         self.getActiveMode = 'Point'
         self.current_viewer.drawROI = "PointROI"  # Set to "Point" for point drawing
         self.active_button_color(self.ui.pushButton_9)
+        self.current_viewer.setROIsAreMovable() 
 
+    def activate_line_segment_mode(self):
+        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
+            return
+        self.current_viewer = self.ui.stackedWidget.currentWidget()
+        self.current_viewer.regionZoomButton = None
+        self.current_viewer.selectionButton = None
+        self.current_viewer.zoomOutButton = None
+        self.ui.label_2.setText("Line segment mode activated. Draw a line segment on the image.")
+        self.getActiveMode = 'LineSegment'
+        self.current_viewer.drawROI = "LineSegmentROI"  # Triggers line segment drawing on viewer
+        self.active_button_color(self.ui.pushButton_14)
+        self.current_viewer.setROIsAreMovable() 
+        
     def setScale(self):
-        scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to real units scale for all images.", value=1.0, min=0.1, max=10.0)
+        # scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to nm scale for current image.")
+        ok = False
+        scale_factor = None
+        scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to nm scale for current image.", "Scale (nm/pixel):", 0.1, 0.01, 100, 2, step=0.01)
+
         if ok:
             self.current_viewer = self.ui.stackedWidget.currentWidget()
-            self.current_viewer.setScale(scale_factor)
-            # self.updateBrowserText(f"Scale set to {scale_factor:.2f}x")
+            self.current_viewer._pxScale = scale_factor
+            self.updateBrowserText(f"Scale set to {scale_factor:.2f} nm/pixel")
+            width_real = self.current_viewer._imgShape[0] * scale_factor
+            height_real = self.current_viewer._imgShape[1] * scale_factor
+            self.ui.label_5.setText(
+                            f"Scale: {scale_factor:.2f} nm/pixel \n "
+                            f"({width_real:.1f} x {height_real:.1f} nm)"
+                        )
     
     def autoSetScale(self):
         """
@@ -353,15 +398,24 @@ class ImageLabeling(QWidget):
         current_index = self.ui.stackedWidget.currentIndex()
         if 0 <= current_index < len(self.image_paths):
             filename = os.path.basename(self.image_paths[current_index])
-        
-        pixel_size_x, width_real, height_real = self.get_scan_dim(filename)
-        
-        if pixel_size_x is not None:
+
+        if self.metadata_dict:
+            pixel_size_x, width_real, height_real = self.get_scan_dim(filename)
+            if pixel_size_x is not None:
+                        self.ui.label_5.setText(
+                            f"Scale: {pixel_size_x:.2f} nm/pixel \n "
+                            f"({width_real:.1f} x {height_real:.1f} nm)"
+                        )
+                        self.currentPxSize= pixel_size_x
+                        self.current_viewer._pxScale = pixel_size_x
+        elif self.current_viewer._pxScale is not None:
             self.ui.label_5.setText(
-                f"Scale: {pixel_size_x:.5f} nm/pixel \n "
-                f"({width_real:.1f} x {height_real:.1f} nm)"
+                f"Scale: {self.current_viewer._pxScale:.2f} nm/pixel \n "
+                f"({self.current_viewer._imgShape[0] * self.current_viewer._pxScale:.1f} x {self.current_viewer._imgShape[1] * self.current_viewer._pxScale:.1f} nm)"
             )
-            self.currentPxSize= pixel_size_x
+        else:
+            self.ui.label_5.setText("Scale: Please set manually.")
+        
 
     def get_scan_dim(self, filename):
         if self.metadata_dict and 'Filename' in self.metadata_dict and 'Pixel Scale X (nm)' in self.metadata_dict:
@@ -610,12 +664,16 @@ class ImageLabeling(QWidget):
             self.updateBrowserText(f"Loaded annotations from {file_path}")
             self.current_viewer = hold_viewer  # Return to the originally active viewer
             self.ui.stackedWidget.setCurrentWidget(hold_viewer)
+            self.labelTextDisplay(os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()]))  # Update label text display
             # self.ui.stackedWidget.setCurrentIndex()
 
     def save_annotations(self):
         # Save annotations to a file
-        # file_path, _ = QFileDialog.getSaveFileName(self, "Save Annotations", "", "CSV Files (*.csv)")
-        file_path = f"{self.data_dir}/annotations.csv"
+        if self.data_dir is None:
+            self.data_dir = ""
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Annotations", self.data_dir, "CSV Files (*.csv)")
+        if not file_path:
+            file_path = f"{self.data_dir}/annotations.csv"
         if file_path:
             # Implement saving logic here
             try:
@@ -684,18 +742,35 @@ class ImageLabeling(QWidget):
                 dy = roi.rect().height()
                 # Append ROI(s) and filename to self.annotations_df
                 # self.annotations_df = pd.DataFrame(bboxData, columns=['type', 'x1', 'y1', 'dx', 'dy', 'file'])
-            if roiType == "LineROI":
+                roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
+
+            if roiType == "VectorROI":
                 x1 = roi.line().x1()
                 y1 = roi.line().y1()
                 dx = roi.line().x2()
                 dy = roi.line().y2()
                 # self.annotations_df = pd.DataFrame(bboxData, columns=['type', 'x1', 'y1', 'x2', 'y2', 'file'])
+                roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
+
+            if roiType == "LineSegmentROI":
+                print(roi)
+                linePointList = []
+                for point in roi._points:
+                    print(point)
+                    x1 = point.x()
+                    y1 = point.y()
+                    dx = 0
+                    dy = 0
+                    # linePointList.append((x1, y1, dx, dy))
+                    roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
             if roiType == "PointROI":
                 x1 = roi.rect().x()
                 y1 = roi.rect().y()
                 dx = 0  # Point has no width
                 dy = 0  # Point has no height
                 # self.annotations_df = pd.DataFrame(pointData, columns=['type', 'x1', 'y1', 'dx', 'dy', 'file'])
+                roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
+
             
             # Figuring out a way to have chirality detection run whenever drawing a new 9AP
             # box, and auto vector drawing when S or R is determined by user. TBA
@@ -710,7 +785,6 @@ class ImageLabeling(QWidget):
             #     roi_df = pd.concat([roi_df, pd.DataFrame(vectorData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
             #     self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
 
-            roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
             new_df = pd.DataFrame(roiData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
             self.annotations_df = pd.concat([self.annotations_df, new_df], ignore_index=True)
             self.labelTextDisplay(filename)  # Update label text display
@@ -730,20 +804,29 @@ class ImageLabeling(QWidget):
                     y2 = int(y2)
                     x2 = int(x2)
                     bbox = (y1, x1, y2, x2)
-                    print(bbox)
+                    
+                    # print(bbox)
                     image = imread(self.image_paths[current_index], as_gray=True)
                     img = (image - image.min()) / (image.max() - image.min())
                     cropped_img = img[y1:y2, x1:x2]
                     chirality, vector = self.detectChirality(cropped_img, pad=0, filename=filename, label=label, bbox=bbox, plot_results=False)
-                    print(vector)
+                    # if label == "9AP (R)" and vector is not None: # Temporary fix for R molecules with bright lobes
+                    #     try:
+                    #         invertVector = vector.copy()
+                    #         vector[0][2], vector[0][3], vector[0][4], vector[0][5] = invertVector[0][4], invertVector[0][5], invertVector[0][2], invertVector[0][3]
+                    #     except Exception as e:
+                    #         print(e)
+                    #         print("Vector inversion failed, forgetting.")
                     roi_df = pd.concat([roi_df, pd.DataFrame(vector, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
                     self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
                     self.autoVector = True  # Re-enable for future use
 
     def labelTextDisplay(self, filename):
         # Display label counts in textBrowser_2
-        # Count ROIs by type
-        roi_counts = self.annotations_df[self.annotations_df['file'] == filename]['type'].value_counts()
+        # Count each annotation objectName only once per file.
+        # roi_counts = self.annotations_df[
+        #     self.annotations_df['file'] == filename
+        # ].drop_duplicates(subset='objectName')['objectName'].value_counts()
         text_lines = []
         # if label and label != "Empty Label":
         #     self.getLabelExamples()
@@ -752,12 +835,28 @@ class ImageLabeling(QWidget):
             label_counts = self.annotations_df[
                 (self.annotations_df['file'] == filename) &
                 (self.annotations_df['label'] != 'Empty Label')
-            ]['label'].value_counts()
+            ].drop_duplicates(subset='objectName')['label'].value_counts()
             if not label_counts.empty:
                 text_lines.append("Label counts:")
                 text_lines += [f"{label}: {count}" for label, count in label_counts.items()]
+        
+
+        if 'LineSegmentROI' in self.annotations_df['type'].values:
+            line_segments = self.annotations_df[
+                (self.annotations_df['file'] == filename) &
+                (self.annotations_df['type'] == 'LineSegmentROI')
+            ]
+            totalSegLength = 0.0
+            lengthSTD = 0.0
+            for _, segment in line_segments.groupby('objectName', sort=False):
+                totalSegLength += self.computeLineSegLength(segment)[0]
+            avgLength = totalSegLength / len(line_segments['objectName'].unique()) if len(line_segments['objectName'].unique()) > 0 else 0
+            # lengthSTD = line_segments.groupby('objectName').apply(lambda seg: self.computeLineSegLength(seg)).std() #Should compute more efficiently
+            # text_lines.append(f"Total line segment length: {totalSegLength:.2f} nm")
+            text_lines.append(f"Avg GNR length: {avgLength:.2f} nm") # Should be better abstracted
 
         self.ui.textBrowser_2.setText('\n'.join(text_lines) if text_lines else "No ROIs or labels assigned yet.")
+
 
     def get_current_label(self):
         """Get the currently selected label from listWidget_2"""
@@ -956,7 +1055,7 @@ class ImageLabeling(QWidget):
         # if "vacancy" in [label.lower() for label in self.labelList] or \
         #     "vacancies" in [label.lower() for label in self.labelList]:
         #     vacancy_detection = True
-        self.ui.radioButton.setChecked(False) # Disable autovector 
+        # self.ui.radioButton.setChecked(False) # Disable autovector 
         self.autoVector = False
         current_index = self.ui.stackedWidget.currentIndex()
         self.activate_bounding_box_mode()
@@ -1139,9 +1238,9 @@ class ImageLabeling(QWidget):
             if roi is None:
                 self.updateBrowserText("No vector ROI selected.")
                 return
-            # For a LineROI, get the vector's dx and dy
+            # For a VectorROI, get the vector's dx and dy
             # print(f"Selected ROI: {roi.__class__.__name__}")
-            if roi.__class__.__name__ == "LineROI":
+            if roi.__class__.__name__ == "VectorROI":
                 x1 = roi.line().x1()
                 y1 = roi.line().y1()
                 x2 = roi.line().x2()
@@ -1151,8 +1250,8 @@ class ImageLabeling(QWidget):
                 self.symmetryVector = [dx, dy]
                 self.updateBrowserText(f"Symmetry vector set: dx={dx}, dy={dy}")
                 drawer = self.current_viewer.drawROI
-                # Temporarily set drawROI to "LineROI" to remove the old vector
-                self.current_viewer.drawROI = "LineROI"
+                # Temporarily set drawROI to "VectorROI" to remove the old vector
+                self.current_viewer.drawROI = "VectorROI"
                 self.current_viewer.deleteROI(roi)  # Remove the old vector ROI
                 self.current_viewer.roichanged = "loaded"  # Mark as added for roiUpdate
                 self.current_viewer.addROIs(roi, setColor = "#F5E400", labelOverride = "Symmetry Vector")
@@ -1191,7 +1290,7 @@ class ImageLabeling(QWidget):
             chiral_y0 = vector[1] + y1 - pad
             chiral_x1 = vector[2] + x1 - pad
             chiral_y1 = vector[3] + y1 - pad
-            vectorData = [[None, 'LineROI', chiral_x0, chiral_y0, chiral_x1, chiral_y1, filename, 'Empty Label']]
+            vectorData = [[None, 'VectorROI', chiral_x0, chiral_y0, chiral_x1, chiral_y1, filename, 'Empty Label']]
             # roi_df = pd.concat([roi_df, pd.DataFrame(vectorData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
         
         return chirality, vectorData
@@ -1208,7 +1307,7 @@ class ImageLabeling(QWidget):
 
     def get_vector_angles_within_9AP(self): # Rename to get_results
         """
-        Find all LineROIs (vectors) within 9AP bounding boxes and calculate their angles with respect to the symmetryVector.
+        Find all VectorROIs (vectors) within 9AP bounding boxes and calculate their angles with respect to the symmetryVector.
         Returns:
             List of tuples: [(roi, angle_deg), ...]
         """
@@ -1227,21 +1326,32 @@ class ImageLabeling(QWidget):
         results = []
         coverage = []
         molec_count = []
+        molec_density = []
+        vacancy_count = []
+        vac_density = []
         angle_dict = {'S': [], 'R': [], 'None': []}
         i = 0
         for filename in self.annotations_df['file'].unique():
             print(f"Compiling from file: {filename}")
             # filename = os.path.basename(self.image_paths[current_index])
+            
             # Get all 9AP bounding boxes
             bbox_df = self.annotations_df[
                 (self.annotations_df['file'] == filename) &
                 (self.annotations_df['type'] == 'RectROI') &
                 (self.annotations_df['label'].str.contains('9AP', case=False, na=False))
             ]
-            # Get all vectors (LineROI)
+
+            # Get all vectors (VectorROI)
             vector_df = self.annotations_df[
                 (self.annotations_df['file'] == filename) &
-                (self.annotations_df['type'] == 'LineROI')
+                (self.annotations_df['type'] == 'VectorROI')
+            ]
+
+            points_df = self.annotations_df[
+                (self.annotations_df['file'] == filename) &
+                (self.annotations_df['type'] == 'PointROI') &
+                (self.annotations_df['label'].str.contains('vacancy', case=False, na=False))
             ]
             
             # Get the dimensions of the scan for coverage calculation
@@ -1255,6 +1365,11 @@ class ImageLabeling(QWidget):
             total_molec_area = len(bbox_df) * molec_area
             coverage.append(total_molec_area / scan_area if scan_area > 0 else 0)
             molec_count.append(len(bbox_df))
+            molec_density.append(len(bbox_df) / scan_area if scan_area > 0 else 0)
+
+            if len(points_df) > 0:
+                vacancy_count.append(len(points_df))
+                vac_density.append(len(points_df) / scan_area if scan_area > 0 else 0)
 
             # Prepare to collect angles by enantiomer
             for _, bbox in bbox_df.iterrows():
@@ -1300,7 +1415,10 @@ class ImageLabeling(QWidget):
         self.updateBrowserText(f"Found {len(results)} total vectors within 9AP bounding boxes.")
         total_R = len(angle_dict['R'])
         total_S = len(angle_dict['S'])
-        ee = (total_S - total_R) / (total_S + total_R)
+        try:
+            ee = (total_S - total_R) / (total_S + total_R)
+        except ZeroDivisionError:
+            ee = 0
         coverage = np.mean(coverage) * 100  # Convert to percentage
         molec_avg = np.mean(molec_count)
         unknown_molec = np.sum(molec_count) - (total_S + total_R)
@@ -1310,19 +1428,42 @@ class ImageLabeling(QWidget):
         std = np.std(molec_count)
         print(f"9AP count std dev: {std:.2f}")
 
+        vac_avg = np.mean(vacancy_count) if len(vacancy_count) > 0 else 0
+        vac_density_avg = np.mean(vac_density) if len(vac_density) > 0 else 0
+        vac_density_std = np.std(vac_density) if len(vac_density) > 0 else 0
+        molec_density_avg = np.mean(molec_density) if len(molec_density) > 0 else 0
+        molec_density_std = np.std(molec_density) if len(molec_density) > 0 else 0
+        vac_norm = vac_density_avg / molec_density_avg if molec_density_avg > 0 else 0
+        print(f"Average vacancies per image: {vac_avg:.2f}")
+        print(f"Average vacancy density: {vac_density_avg:.2e} vacancies/nm^2")
+        print(f"Vacancy density std dev: {vac_density_std:.2e}")
+        print(f"Average molecule density: {molec_density_avg:.2e} molecules/nm^2")
+        print(f"Molecule density std dev: {molec_density_std:.2e}")
+        print(f"Vacancies per 50 nm scan: {vac_density_avg * 2500:.2f}")
+        print(f"Molecules per 50 nm scan: {molec_density_avg * 2500:.2f}")
+        print(f"Vacancy density normalized by molecule coverage: {vac_norm:.2f}")
 
-        # Plot stacked histogram by enantiomer
+        angle_bin_N, ok = QInputDialog.getInt(
+            self, "Label Histogram", "How many bins?:", value=18, min=1, max=48
+        )
+        if not ok:
+            return
+        
+        # Plot histogram by enantiomer
         if results:
-            bins = np.linspace(0, 360, 36)
+            bins = np.linspace(0, 360, angle_bin_N)
             plt.figure(figsize=(7, 5))
-            plt.hist(
-            [angle_dict['S'], angle_dict['R']],
-            bins=bins,
-            stacked=True,
-            color=[ '#56B4E9','#CC79A7',],
-            label=['(S)', '(R)']
-            )
+            # plt.hist(
+            # [angle_dict['S'], angle_dict['R']],
+            # bins=bins,
+            # stacked=True,
+            # color=[ '#56B4E9','#CC79A7',],
+            # label=['(S)', '(R)']
+            # )
             
+            plt.hist(angle_dict['S'], bins=bins, alpha =0.7, label='(S)', color='#56B4E9')
+            plt.hist(angle_dict['R'], bins=bins, alpha =0.7, label='(R)', color='#CC79A7')
+
             total_entropy = 0
             # Compute shannon entropy 
             for enantiomer, data in angle_dict.items():
@@ -1347,11 +1488,13 @@ class ImageLabeling(QWidget):
             self.updateBrowserText(f"Shannon Entropy (avg): {total_entropy/2:.4f}")
             self.updateBrowserText(f"Enantiomeric Excess (EE): {ee:.2f} (S: {total_S}, R: {total_R})")
             
-
+            
             plt.xlabel('Angle (degrees)')
             plt.ylabel('Count')
             # plt.title(f'Molecule Orientations w.r.t.{self.symmetryVector[1] / self.symmetryVector[0]:.4f}') #for {os.path.basename(self.image_paths[current_index])}.')
-            plt.title(f'Molecule Orientations w.r.t. Symmetry Vector [-101]')
+            data_dir_parts = self.data_dir.replace('\\', '/').split('/')
+            data_dir_parent = data_dir_parts[-2] if len(data_dir_parts) >= 2 else self.data_dir
+            plt.title(f'Orientations w.r.t. [-101] for {data_dir_parent}, {os.path.basename(self.image_paths[current_index])}.')
             plt.legend()
             plt.tight_layout()
             # Set x-axis ticks to integer values only
@@ -1364,10 +1507,15 @@ class ImageLabeling(QWidget):
 
     def runGNRSegmentation(self):
         print("Characterizing GNRs...")
+        if self.ui.checkBox.isChecked():
+            plot_results = True
+        else:
+            plot_results = False
         self.ui.label_2.setText("GNR characterization running.")
         from core.GNR_segment import run_GNR_segment
         current_index = self.ui.stackedWidget.currentIndex()
-        
+        self.clearAnnotations()
+
         if 0 <= current_index < len(self.image_paths):
             filename = os.path.basename(self.image_paths[current_index])
             # self.annotations_df = self.annotations_df[self.annotations_df['file'] != filename]
@@ -1377,15 +1525,324 @@ class ImageLabeling(QWidget):
             # Get the dimensions of the scan for coverage calculation
             px_scale, scan_width, scan_height = self.get_scan_dim(filename)
             if scan_width is None or scan_height is None:
-                self.updateBrowserText(f"Could not determine scan dimensions for {filename}. Igrnoe GNR length evaluation.")
+                self.updateBrowserText(f"Could not determine scan dimensions for {filename}. Ignore GNR length evaluation.")
 
-            gnr_rois = run_GNR_segment(image, px_scale=px_scale, sigma=None, block_size=11, num_bins=None, thresholds=None, plot_results=True)
-        self.ui.label_2.setText(f"Number of GNR segments found: {gnr_rois[3]}")
-        self.updateBrowserText(f"GNR segmentation found {gnr_rois[3]} segments.")
-        self.updateBrowserText(f"Average GNR length: {gnr_rois[4]:.2f} nm.")
+            gnr_segments, gnr_binary, gnr_skeleton, gnr_distance_map, gnr_num_segments, gnr_avg_length, segment_endpoints = run_GNR_segment(image, px_scale=px_scale, sigma=None, block_size=11, num_bins=None, thresholds=None, plot_results=plot_results)
+
+        roi_df = pd.DataFrame(columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
+
+        for segment in segment_endpoints:
+            print(f"Adding GNR segment: {segment}")
+            roiData = []
+            x1, y1, dx, dy = segment
+            roiData = [[None, 'LineSegmentROI', x1, y1, dx, dy, filename, self.current_label]]
+            roi_df = pd.concat([roi_df, pd.DataFrame(roiData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
+
+        self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
+        self.ui.label_2.setText(f"Number of GNR segments found: {gnr_num_segments}")
+        self.updateBrowserText(f"GNR segmentation found {gnr_num_segments} segments.")
+        self.updateBrowserText(f"Average GNR length: {gnr_avg_length:.2f} nm.")
+
+    def computeLineSegLength(self, segment_roi):
+        segLength = 0.0
+        points = []
+        linearity = None
+        if segment_roi.iloc[0]['type'] == 'LineSegmentROI':
+            prev_x = prev_y = None
+            for point in segment_roi.itertuples():
+                x1 = point.x1
+                y1 = point.y1
+                if x1 is None or y1 is None:
+                    continue
+                points.append((float(x1), float(y1)))
+                if prev_x is not None and prev_y is not None:
+                    dx = x1 - prev_x
+                    dy = y1 - prev_y
+                    segLength += (dx ** 2 + dy ** 2) ** 0.5
+                prev_x, prev_y = x1, y1
+
+            if len(points) >= 2:
+                x = np.asarray([p[0] for p in points], dtype=float)
+                y = np.asarray([p[1] for p in points], dtype=float)
+
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+
+                p1 = np.array([x[0], y[0]])
+                p2 = np.array([x[-1], y[-1]])
+                
+                # Straight-line distance
+                ideal_length = np.linalg.norm(p2 - p1)
+                if ideal_length == 0:
+                    linearity = 100.0
+                else:
+                    # Cumulative path distance
+                    if segLength == 0:
+                        linearity = 100.0
+                    else:
+                        ratio = ideal_length / segLength
+                        linearity = float(np.clip(ratio * 100.0, 0, 100.0))
+
+        seglength_nm = segLength * self.currentPxSize if hasattr(self, 'currentPxSize') and self.currentPxSize else None
+        return seglength_nm, r_value**2, linearity
+
+    def plotLineSegResults(self):
+        filename = os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()])
+
+        if 'LineSegmentROI' in self.annotations_df['type'].values:
+            line_segments = self.annotations_df[
+                (self.annotations_df['file'] == filename) &
+                (self.annotations_df['type'] == 'LineSegmentROI')
+            ]
+            lengthList = []
+            r_squared_values = []
+            totalSegLength = 0.0
+            lengthSTD = 0.0
+            for _, segment in line_segments.groupby('objectName', sort=False):
+                length, r_squared, linearity = self.computeLineSegLength(segment)
+                if length is not None:
+                    totalSegLength += length
+                    lengthList.append(length)
+                if r_squared is not None:
+                    r_squared_values.append(r_squared)
+            avgLength = totalSegLength / len(line_segments['objectName'].unique()) if len(line_segments['objectName'].unique()) > 0 else 0
+  
+            if len(lengthList) > 1:
+                lengthSTD = float(np.std(lengthList))
+
+            countBins, ok = QInputDialog.getInt(
+                        self, "Length Histogram", "How many bins?:", value=10, min=1, max=48
+                    )
+            if not ok:
+                return
+
+            gnrWidth, ok = QInputDialog.getDouble(
+                self, "GNR Coverage", "GNR width (nm):", value=2.0, min=0.1, max=1000, decimals=1
+            )
+            if not ok:
+                return
+            gnrArea = gnrWidth * totalSegLength 
+            imgArea = self.current_viewer._imgShape[0] * self.currentPxSize * self.current_viewer._imgShape[1] * self.currentPxSize if hasattr(self, 'currentPxSize') and self.currentPxSize else 0
+            gnrCoverage = gnrArea / imgArea if imgArea > 0 else 0
+            self.updateBrowserText(f"GNR area: {gnrArea:.2f} nm², Coverage: {gnrCoverage:.2f}")
+
+            if len(lengthList) > 0:
+                plt.figure(figsize=(8, 5))
+                plt.hist(lengthList, bins=countBins, color='steelblue', edgecolor='black', alpha=0.85, density=True, stacked=True)
+                plt.xlabel('R [nm]')
+                plt.ylabel('Density [1/nm]')
+                plt.title(f'GNR Length Distribution - {filename} \n Avg Length: {avgLength:.2f} ± {lengthSTD:.2f} nm')
+                plt.grid(axis='y', alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+                self.updateBrowserText(
+                    f"Plotted GNR length histogram. N={len(lengthList)}, Avg={avgLength:.2f} ± {lengthSTD:.2f} nm."
+                )
+                self.saveResults(filename, avgLength, lengthSTD, gnrCoverage, lengthList, r_squared_values)
+            else:
+                self.updateBrowserText("No valid GNR lengths found to plot.")
+        else:
+            self.updateBrowserText("No line segments found for GNR length histogram.")
+
+    def saveResults(self, filename=None, avgLength=None, lengthSTD=None, gnrCoverage=None, lengthList=None, r_squared_values=None):
+        if filename is None:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(self.data_dir, f"gnr_results_{timestamp}.csv")
+        df = pd.DataFrame({
+            'filename': [filename],
+            'avg_length': [avgLength],
+            'length_std': [lengthSTD],
+            'gnr_coverage': [gnrCoverage],
+            'length_list': lengthList,
+            'r_squared_values': r_squared_values
+        })
+        savefile = self.data_dir + "\\_results.csv"
+        if not os.path.exists(savefile):
+            with open(savefile, 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(df.columns)
+                writer.writerow(df.iloc[0])
+        else:
+            with open(savefile, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(df.iloc[0])
+            self.updateBrowserText(f"GNR results saved to {savefile}")
+        self.updateBrowserText(f"Results saved to {filename}")
+
+    def saveLabelClips(self):
+        from datetime import datetime
+
+        if not self.data_dir or not os.path.isdir(self.data_dir):
+            self.updateBrowserText("No valid image directory selected.")
+            return
         
+        if not self.symmetryVector:
+            self.updateBrowserText("Symmetry vector not set. Please set it before saving label clips.")
+            return
+
+        n_clips, ok = QInputDialog.getInt(
+            self, "Save Label Clips", "Clips per (label, angle):", value=5, min=1, max=500
+        )
+        if not ok:
+            return
+
+        context_scale, ok = QInputDialog.getDouble(
+            self, "Save Label Clips", "Context scale around bbox:", value=1.6, min=1.0, max=5.0, decimals=2
+        )
+        if not ok:
+            return
+
+        angle_bin_deg, ok = QInputDialog.getInt(
+            self, "Save Label Clips", "Bin angle width (deg):", value=10, min=1, max=180
+        )
+        if not ok:
+            return
+
+        def _safe_name(text):
+            return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in str(text)).strip("_") or "unknown"
+
+        def _vector_angle_deg(vec_row):
+            vx = float(vec_row["dx"]) - float(vec_row["x1"])
+            vy = -(float(vec_row["dy"]) - float(vec_row["y1"]))  # image y-axis correction
+            if vx == 0 and vy == 0:
+                return None
+            
+
+            # Vector direction
+            v = np.array([vx, vy]) #Temp fix inverting y 
+            sym_vec = np.array(self.symmetryVector)
+            # Calculate angle in degrees (0 to 360)
+            norm_v = np.linalg.norm(v)
+            norm_sym = np.linalg.norm(sym_vec)
+            if norm_v == 0 or norm_sym == 0:
+                angle_deg = None
+            else:
+                angle1 = np.arctan2(v[1], v[0])
+                angle2 = np.arctan2(sym_vec[1], sym_vec[0])
+                diff = angle1 - angle2
+                angle_deg = (360 - np.degrees(diff)) % 360
+                
+            # return (np.degrees(np.arctan2(vy, vx)) + 360.0) % 360.0
+            return angle_deg
+
+        def _bbox_contains_line(bbox_row, line_row):
+            x1 = float(bbox_row["x1"])
+            y1 = float(bbox_row["y1"])
+            x2 = x1 + float(bbox_row["dx"])
+            y2 = y1 + float(bbox_row["dy"])
+            xmin, xmax = sorted((x1, x2))
+            ymin, ymax = sorted((y1, y2))
+
+            lx1, ly1 = float(line_row["x1"]), float(line_row["y1"])
+            lx2, ly2 = float(line_row["dx"]), float(line_row["dy"])
+            return (
+                xmin <= lx1 <= xmax
+                and ymin <= ly1 <= ymax
+                and xmin <= lx2 <= xmax
+                and ymin <= ly2 <= ymax
+            )
+
+        rect_df = self.annotations_df[
+            (self.annotations_df["type"] == "RectROI")
+            & (self.annotations_df["label"].notna())
+            & (self.annotations_df["label"] != "Empty Label")
+        ].copy()
+
+        if rect_df.empty:
+            self.updateBrowserText("No labeled bounding boxes found.")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_root = os.path.join(self.data_dir, f"label_clips_{timestamp}")
+        os.makedirs(out_root, exist_ok=True)
+
+        image_cache = {}
+        counters = {}
+        saved_total = 0
+
+        for filename in rect_df["file"].dropna().unique():
+            image_path = os.path.join(self.data_dir, filename)
+            if not os.path.isfile(image_path):
+                self.updateBrowserText(f"Image not found: {filename}")
+                continue
+
+            if filename not in image_cache:
+                image_cache[filename] = imread(image_path)
+
+            img = image_cache[filename]
+            h, w = img.shape[:2]
+
+            file_rects = rect_df[rect_df["file"] == filename]
+            file_lines = self.annotations_df[
+                (self.annotations_df["file"] == filename)
+                & (self.annotations_df["type"] == "VectorROI")
+            ]
+
+            for _, bbox in file_rects.iterrows():
+                label = str(bbox["label"])
+                x = float(bbox["x1"])
+                y = float(bbox["y1"])
+                bw = float(bbox["dx"])
+                bh = float(bbox["dy"])
+
+                # Match orientation from first vector inside bbox
+                angle = None
+                for _, line in file_lines.iterrows():
+                    if _bbox_contains_line(bbox, line):
+                        angle = _vector_angle_deg(line)
+                        break
+
+                if angle is None:
+                    angle_key = "angle_unknown"
+                else:
+                    binned = int(round(angle / angle_bin_deg) * angle_bin_deg) % 360
+                    angle_key = f"angle_{binned:03d}deg"
+
+                group_key = (_safe_name(label), angle_key)
+                if counters.get(group_key, 0) >= n_clips:
+                    continue
+
+                cx = x + bw / 2.0
+                cy = y + bh / 2.0
+                crop_w = max(1.0, bw * context_scale)
+                crop_h = max(1.0, bh * context_scale)
+
+                x0 = max(0, int(np.floor(cx - crop_w / 2.0)))
+                y0 = max(0, int(np.floor(cy - crop_h / 2.0)))
+                x1 = min(w, int(np.ceil(cx + crop_w / 2.0)))
+                y1 = min(h, int(np.ceil(cy + crop_h / 2.0)))
+
+                if x1 <= x0 or y1 <= y0:
+                    continue
+
+                clip = img[y0:y1, x0:x1]
+                label_dir = os.path.join(out_root, _safe_name(label), angle_key)
+                os.makedirs(label_dir, exist_ok=True)
+
+                idx = counters.get(group_key, 0) + 1
+                clip_name = f"{os.path.splitext(filename)[0]}_{_safe_name(label)}_{angle_key}_{idx:03d}.png"
+                clip_path = os.path.join(label_dir, clip_name)
+
+                if clip.ndim == 2:
+                    plt.imsave(clip_path, clip, cmap="gray")
+                else:
+                    plt.imsave(clip_path, clip)
+
+                counters[group_key] = idx
+                saved_total += 1
+
+        self.updateBrowserText(f"Saved {saved_total} clips to {out_root}")
+
+    def showResults(self):
+        print(self.labelList)
+        if any("9AP" in str(label) for label in self.labelList):
+            self.get_vector_angles_within_9AP()
+        if any("GNR" in str(label) for label in self.labelList):
+            print("Plotting GNR length histogram...")
+            self.plotLineSegResults()
 
 def handleLeftClick(x, y):
     row = int(y)
     column = int(x)
     print("Clicked on image pixel (row="+str(row)+", column="+str(column)+")")
+    

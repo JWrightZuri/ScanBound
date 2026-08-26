@@ -50,7 +50,7 @@ def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins
     img_smooth = gaussian(img, sigma=sigma)
 
     # Remove the dark background with contrast stretching 
-    # img_smooth = exposure.rescale_intensity(img_smooth, in_range=(0.45, 1.0), out_range=(0, 1)) # Required when Au111 herringbones are present
+    img_smooth = exposure.rescale_intensity(img_smooth, in_range=(0.40, 1.0), out_range=(0, 1)) # Required when Au111 herringbones are present
 
     # Adaptive thresholding
     if block_size is None:
@@ -178,6 +178,15 @@ def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins
     seg_lengths_nm = [l * px_scale for l in seg_lengths]
     avg_length = float(np.mean(seg_lengths_nm)) if seg_lengths_nm else 0.0
 
+    # Store each segment's endpoints in x1, y1, dx, dy order.
+    segment_endpoints = [
+        (seg[0][1], seg[0][0], seg[-1][1] - seg[0][1], seg[-1][0] - seg[0][0])
+        for seg in segments
+        if seg
+    ]
+    for x1, y1, dx, dy in segment_endpoints:
+        print(f"{x1}, {y1}, {dx}, {dy}")
+    
     print(f"Average segment length: {avg_length:.2f} nm")
 
 
@@ -214,15 +223,15 @@ def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins
         
         plt.show()
 
-    return binary_clean, img_skeleton, distance_map, len(segments)
+    return segments, binary_clean, img_skeleton, distance_map, len(segments), avg_length, segment_endpoints
 
 
 if __name__ == "__main__":
     # Example usage
     # image_path = r"C:\Users\wrja\Desktop\STM_Data\GNR_files\2025-05-14\saved_output\20250506_AuMica_125j_393b_38594_38612_38613_20250514_area1_0013_Z.jpg"  # Replace with your image path
     # image_path = r"C:\Users\wrja\Desktop\STM_Data\GNR_files\2025-05-14\saved_output\20250506_AuMica_125j_393b_38594_38612_38613_20250514_area1_0001_Z.jpg"
-    image_path = r"C:\Users\wrja\Desktop\STM_Data\GNR_files\S5_350.7depo_524a_39370_39372_0001_crop.png"
-    # image_path = r"C:\Users\wrja\Desktop\STM_Data\GNR_files\S6_350.10depo_524a_39379_39380_0007.png"
+    # image_path = r"C:\Users\wrja\Desktop\STM_Data\GNR_files\S5_350.7depo_524a_39370_39372_0001_crop.png"
+    image_path = r"C:\Users\wrja\Desktop\STM_Data\GNR_files\S6_350.10depo_524a_39379_39380_0007.png"
     
     image = imread(image_path, as_gray=True)
-    binary_mask, skeleton, distance_map, num_segments = run_GNR_segment(image, px_scale=0.1, plot_results=True)
+    binary_mask, skeleton, distance_map, num_segments, avg_length = run_GNR_segment(image, px_scale=0.1, plot_results=True)

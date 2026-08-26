@@ -1,0 +1,1158 @@
+""" QtImageViewer.py: PyQt image viewer widget based on QGraphicsView with mouse zooming/panning and ROIs.
+
+"""
+
+import os.path
+
+try:
+    from PyQt6.QtCore import Qt, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QSize
+    from PyQt6.QtGui import QImage, QPixmap, QPainterPath, QMouseEvent, QPainter, QPen, QBrush, QColor, QFont
+    from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QFileDialog, QSizePolicy, \
+        QGraphicsItem, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsLineItem, QGraphicsPolygonItem, \
+        QGraphicsTextItem
+except ImportError:
+    try:
+        from PyQt5.QtCore import Qt, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QSize
+        from PyQt5.QtGui import QImage, QPixmap, QPainterPath, QMouseEvent, QPainter, QPen, QBrush, QColor, QFont
+        from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene, QFileDialog, QSizePolicy, \
+            QGraphicsItem, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsLineItem, QGraphicsPolygonItem, \
+            QGraphicsTextItem
+    except ImportError:
+        raise ImportError("Requires PyQt (version 5 or 6)")
+
+# numpy is optional: only needed if you want to display numpy 2d arrays as images.
+try:
+    import numpy as np
+except ImportError:
+    np = None
+import math
+
+# qimage2ndarray is optional: useful for displaying numpy 2d arrays as images.
+# !!! qimage2ndarray requires PyQt5.
+#     Some custom code in the viewer appears to handle the conversion from numpy 2d arrays,
+#     so qimage2ndarray probably is not needed anymore. I've left it here just in case.
+try:
+    import qimage2ndarray
+except ImportError:
+    qimage2ndarray = None
+
+__author__ = "Marcel Goldschen-Ohm <marcel.goldschen@gmail.com>"
+__version__ = '2.0.0'
+
+
+class QtImageViewer(QGraphicsView):
+    """ PyQt image viewer widget based on QGraphicsView with mouse zooming/panning and ROIs.
+
+    Image File:
+    -----------
+    Use the open("path/to/file") method to load an image file into the viewer.
+    Calling open() without a file argument will popup a file selection dialog.
+
+    Image:
+    ------
+    Use the setImage(im) method to set the image data in the viewer.
+        - im can be a QImage, QPixmap, or NumPy 2D array (the later requires the package qimage2ndarray).
+        For display in the QGraphicsView the image will be converted to a QPixmap.
+
+    Some useful image format conversion utilities:
+        qimage2ndarray: NumPy ndarray <==> QImage    (https://github.com/hmeine/qimage2ndarray)
+        ImageQt: PIL Image <==> QImage  (https://github.com/python-pillow/Pillow/blob/master/PIL/ImageQt.py)
+
+    Mouse:
+    ------
+    Mouse interactions for zooming and panning is fully customizable by simply setting the desired button interactions:
+    e.g.,
+        regionZoomButton = Qt.LeftButton  # Drag a zoom box.
+        zoomOutButton = Qt.RightButton  # Pop end of zoom stack (double click clears zoom stack).
+        panButton = Qt.MiddleButton  # Drag to pan.
+        wheelZoomFactor = 1.25  # Set to None or 1 to disable mouse wheel zoom.
+
+    To disable any interaction, just disable its button.
+    e.g., to disable panning:
+        panButton = None
+
+    ROIs:
+    -----
+    Can also add ellipse, rectangle, line, and polygon ROIs to the image.
+    ROIs should be derived from the provided EllipseROI, RectROI, VectorROI, and PolygonROI classes.
+    ROIs are selectable and optionally moveable with the mouse (see setROIsAreMovable).
+
+    TODO: Add support for editing the displayed image contrast.
+    TODO: Add support for drawing ROIs with the mouse.
+    """
+
+    # Mouse button signals emit image scene (x, y) coordinates.
+    # !!! For image (row, column) matrix indexing, row = y and column = x.
+    # !!! These signals will NOT be emitted if the event is handled by an interaction such as zoom or pan.
+    # !!! If aspect ratio prevents image from filling viewport, emitted position may be outside image bounds.
+    leftMouseButtonPressed = pyqtSignal(float, float)
+    leftMouseButtonReleased = pyqtSignal(float, float)
+    middleMouseButtonPressed = pyqtSignal(float, float)
+    middleMouseButtonReleased = pyqtSignal(float, float)
+    rightMouseButtonPressed = pyqtSignal(float, float)
+    rightMouseButtonReleased = pyqtSignal(float, float)
+    leftMouseButtonDoubleClicked = pyqtSignal(float, float)
+    rightMouseButtonDoubleClicked = pyqtSignal(float, float)
+
+    # Emitted upon zooming/panning.
+    viewChanged = pyqtSignal()
+
+    # Emitted on mouse motion.
+    # Emits mouse position over image in image pixel coordinates.
+    # !!! setMouseTracking(True) if you want to use this at all times.
+    mousePositionOnImageChanged = pyqtSignal(QPoint)
+
+    # Emit index of selected ROI
+    roiSelected = pyqtSignal(list)
+
+    # Emit the coordinates of the drawn ROI
+    roiDict = pyqtSignal(dict)
+    roiList = pyqtSignal(list)
+    # roiChanged = pyqtSignal(str) # Emit whether the ROI was added or deleted (Can later change to show the coor of the ROI)
+
+    def __init__(self, parent=None):
+        QGraphicsView.__init__(self, parent)
+
+        # Image is displayed as a QPixmap in a QGraphicsScene attached to this QGraphicsView.
+        self.scene = QGraphicsScene()
+        self.setScene(self.scene)
+
+        # Better quality pixmap scaling?
+        # self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+
+        # Displayed image pixmap in the QGraphicsScene.
+        self._image = None
+
+        # Image aspect ratio mode.
+        #   Qt.IgnoreAspectRatio: Scale image to fit viewport.
+        #   Qt.KeepAspectRatio: Scale image to fit inside viewport, preserving aspect ratio.
+        #   Qt.KeepAspectRatioByExpanding: Scale image to fill the viewport, preserving aspect ratio.
+        self.aspectRatioMode = Qt.AspectRatioMode.KeepAspectRatio
+
+        # Scroll bar behaviour.
+        #   Qt.ScrollBarAlwaysOff: Never shows a scroll bar.
+        #   Qt.ScrollBarAlwaysOn: Always shows a scroll bar.
+        #   Qt.ScrollBarAsNeeded: Shows a scroll bar only when zoomed.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Interactions (set buttons to None to disable interactions)
+        # !!! Events handled by interactions will NOT emit *MouseButton* signals.
+        #     Note: regionZoomButton will still emit a *MouseButtonReleased signal on a click (i.e. tiny box).
+        self.regionZoomButton = Qt.MouseButton.LeftButton  # Drag a zoom box.
+        self.zoomOutButton = Qt.MouseButton.RightButton  # Pop end of zoom stack (double click clears zoom stack).
+        self.panButton = Qt.MouseButton.MiddleButton  # Drag to pan.
+        self.wheelZoomFactor = 1.25  # Set to None or 1 to disable mouse wheel zoom.
+
+        self.selectionButton = Qt.MouseButton.LeftButton  # Drag to select an area.
+        self.selectedROI = None  # Store the selected ROI
+        # Stack of QRectF zoom boxes in scene coordinates.
+        # !!! If you update this manually, be sure to call updateViewer() to reflect any changes.
+        self.zoomStack = []
+
+        # Flags for active zooming/panning.
+        self._isZooming = False
+        self._isPanning = False
+        self._isSelecting = False
+        # Store temporary position in screen pixels or scene units.
+        self._pixelPosition = QPoint()
+        self._scenePosition = QPointF()
+
+        # Track mouse position. e.g., For displaying coordinates in a UI.
+        # self.setMouseTracking(True)
+
+        # ROIs.
+        self.ROIs = {
+            "EllipseROI": [],
+            "RectROI": [],
+            "VectorROI": [],
+            "LineSegmentROI": [],
+            "PolygonROI": [],
+            "PointROI": []
+        }
+        self.ROIs_selected = {
+            "EllipseROI": [],
+            "RectROI": [],
+            "VectorROI": [],
+            "LineSegmentROI": [],
+            "PolygonROI": [],
+            "PointROI": []
+        }
+
+        self._roiStartPos = None
+        self._roiEndPos = None
+        self._currentRectROI = None
+        # # For drawing ROIs.
+        self.drawROI = None
+
+        self.roiChanged = ""
+
+        # You can use either Qt.GlobalColor or custom QColor from hex codes
+        self.colorList = [
+            QColor("#B9B1B4"),
+            QColor("#D81B60"),       # Custom color (hex code)
+            QColor("#1E88E5"),       # Another custom color
+            QColor("#D49713"),
+            QColor("#4CDBB0"), 
+            QColor("#D55E00"),
+            QColor("#CC79A7"),
+            QColor("#F0E442"),
+            QColor("#56B4E9"),
+            QColor("#009E73"),
+            QColor("#E69F00"),
+            QColor("#0072B2"), 
+            QColor("#F5E400"),
+            QColor("#FFFFFF"),
+            QColor("#000000")
+            ]
+        self._labelList = []
+        self._currentLabel = "Empty Label"  # Current label for the ROI color
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+
+    def sizeHint(self):
+        return QSize(900, 600)
+
+    def hasImage(self):
+        """ Returns whether the scene contains an image pixmap.
+        """
+        return self._image is not None
+
+    def clearImage(self):
+        """ Removes the current image pixmap from the scene if it exists.
+        """
+        if self.hasImage():
+            self.scene.removeItem(self._image)
+            self._image = None
+
+    def pixmap(self):
+        """ Returns the scene's current image pixmap as a QPixmap, or else None if no image exists.
+        :rtype: QPixmap | None
+        """
+        if self.hasImage():
+            return self._image.pixmap()
+        return None
+
+    def image(self):
+        """ Returns the scene's current image pixmap as a QImage, or else None if no image exists.
+        :rtype: QImage | None
+        """
+        if self.hasImage():
+            return self._image.pixmap().toImage()
+        return None
+
+    def returnImage(self):
+        """ Returns the scene's current image pixmap as a ndarray, or else None if no image exists.
+        :rtype: ndarray | None
+        """
+        if self.hasImage():
+            arr = qimage2ndarray.byte_view(self._image.pixmap().toImage())
+            return arr
+        return None
+    def setImage(self, image):
+        """ Set the scene's current image pixmap to the input QImage or QPixmap.
+        Raises a RuntimeError if the input image has type other than QImage or QPixmap.
+        :type image: QImage | QPixmap
+        """
+        if type(image) is QPixmap:
+            pixmap = image
+        elif type(image) is QImage:
+            pixmap = QPixmap.fromImage(image)
+        elif (np is not None) and (type(image) is np.ndarray):
+            if qimage2ndarray is not None:
+                qimage = qimage2ndarray.array2qimage(image, True)
+                pixmap = QPixmap.fromImage(qimage)
+            else:
+                image = image.astype(np.float32)
+                image -= image.min()
+                image /= image.max()
+                image *= 255
+                image[image > 255] = 255
+                image[image < 0] = 0
+                image = image.astype(np.uint8)
+                height, width = image.shape
+                bytes = image.tobytes()
+                qimage = QImage(bytes, width, height, QImage.Format.Format_Grayscale8)
+                pixmap = QPixmap.fromImage(qimage)
+        else:
+            raise RuntimeError("ImageViewer.setImage: Argument must be a QImage, QPixmap, or numpy.ndarray.")
+        
+        # # Apply a matplotlib colormap
+        # cmap = cm.get_cmap(cmap_name)
+        # colored = cmap(norm)
+        # # Convert to 8-bit RGB
+        # colored = (colored[:, :, :3] * 255).astype(np.uint8)
+
+        if self.hasImage():
+            self._image.setPixmap(pixmap)
+        else:
+            self._image = self.scene.addPixmap(pixmap)
+
+        # Better quality pixmap scaling?
+        # !!! This will distort actual pixel data when zoomed way in.
+        #     For scientific image analysis, you probably don't want this.
+        # self._pixmap.setTransformationMode(Qt.SmoothTransformation)
+
+        self.setSceneRect(QRectF(pixmap.rect()))  # Set scene size to image size.
+        self.updateViewer()
+
+    def addTextOverlay(self, text, x = 5, y = 5, width=0, height=0, font_size=12,
+                       color=Qt.GlobalColor.white):
+        """Add a text annotation over a rectangular section of the image at scene coordinates."""
+        if not self.hasImage():
+            return None
+        
+        text_item = QGraphicsTextItem(text)
+        text_item.setPos(x, y)
+        font = QFont("Arial", font_size, QFont.Weight.Bold)
+        text_item.setFont(font)
+        text_item.setDefaultTextColor(color)
+        self.scene.addItem(text_item)
+
+        return text_item
+
+    def addScaleBar(self,  x=5, y=5, length=100, height=5, color=Qt.GlobalColor.white, background_color=None, border_color=None, thickness=1):
+        """Add a scale bar to the image at scene coordinates."""
+        if not self.hasImage():
+            return None
+
+        # Create a rectangle for the scale bar
+        rect_item = QGraphicsRectItem(x, y, length, height)
+        rect_item.setBrush(QBrush(color))
+
+        if background_color is not None or border_color is not None:
+            if border_color is not None:
+                pen = QPen(border_color)
+                pen.setWidth(thickness)
+                rect_item.setPen(pen)
+            else:
+                rect_item.setPen(QPen(Qt.PenStyle.NoPen))
+
+            if background_color is not None:
+                rect_item.setBrush(QBrush(background_color))
+            else:
+                rect_item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+
+        self.scene.addItem(rect_item)
+
+        return rect_item
+
+    def removeItems(self):
+        """Remove all items from the scene."""
+        for item in self.scene.items():
+            if isinstance(item, (QGraphicsTextItem, QGraphicsRectItem)):
+                self.scene.removeItem(item)
+
+    def open(self, filepath=None):
+        """ Load an image from file.
+        Without any arguments, loadImageFromFile() will pop up a file dialog to choose the image file.
+        With a fileName argument, loadImageFromFile(fileName) will attempt to load the specified image file directly.
+        """
+        if filepath is None:
+            filepath, dummy = QFileDialog.getOpenFileName(self, "Open image file.")
+        if len(filepath) and os.path.isfile(filepath):
+            image = QImage(filepath)
+            self.setImage(image)
+
+    def updateViewer(self):
+        """ Show current zoom (if showing entire image, apply current aspect ratio mode).
+        """
+        if not self.hasImage():
+            return
+        if len(self.zoomStack):
+            self.fitInView(self.zoomStack[-1], self.aspectRatioMode)  # Show zoomed rect.
+        else:
+            self.fitInView(self.sceneRect(), self.aspectRatioMode)  # Show entire image.
+
+    def clearZoom(self):
+        if len(self.zoomStack) > 0:
+            self.zoomStack = []
+            self.updateViewer()
+            self.viewChanged.emit()
+
+    def resizeEvent(self, event):
+        """ Maintain current zoom on resize.
+        """
+        self.updateViewer()
+
+    def mousePressEvent(self, event):
+        """ Start mouse pan or zoom mode.
+        """
+        # Ignore dummy events. e.g., Faking pan with left button ScrollHandDrag.
+        dummyModifiers = Qt.KeyboardModifier(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                                             | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)
+        if event.modifiers() == dummyModifiers:
+            QGraphicsView.mousePressEvent(self, event)
+            event.accept()
+            return
+        
+
+        # # Draw ROI
+        if self.drawROI is not None:
+            # Intercept mouse press events on movable ROIs to allow them to be dragged first.
+            self.selectedROI = None
+            item = self.itemAt(event.pos())
+            if item and (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable) and item.__class__.__name__ == self.drawROI:
+                QGraphicsView.mousePressEvent(self, event)
+                self.selectedROI = item
+                # print(f"Selected ROI: {self.selectedROI}")
+                return
+            
+            if self.drawROI == "EllipseROI":
+                # Click and drag to draw ellipse. +Shift for circle.
+                pass
+            elif self.drawROI == "RectROI":
+                # Click and drag to draw rectangle. +Shift for square.
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._roiStartPos = self.mapToScene(event.pos())
+                    self._currentRectROI = RectROI(self)
+                    self._currentRectROI.setRect(self._roiStartPos.x(), self._roiStartPos.y(), 0, 0)
+                    self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+                    QGraphicsView.mousePressEvent(self, event)
+                    event.accept()
+                else:
+                    event.ignore()
+            elif self.drawROI == "VectorROI":
+                # Click and drag to draw line.
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._roiStartPos = self.mapToScene(event.pos())
+                    self._currentVectorROI = VectorROI(self)
+                    self._currentVectorROI.setLine(self._roiStartPos.x(), self._roiStartPos.y(),
+                                                 self._roiStartPos.x(), self._roiStartPos.y())
+                    # Use NoDrag so we can manually update the line as the mouse moves
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    pen = QPen(Qt.GlobalColor.black)
+                    pen.setCosmetic(True)
+                    pen.setWidth(4)  # Set the desired line thickness here
+                    self._currentVectorROI.setPen(pen)
+
+                    self.scene.addItem(self._currentVectorROI)
+
+                    # QGraphicsView.mousePressEvent(self, event)
+                    # Enable live drawing of the line as the mouse moves
+                    event.accept()
+            elif self.drawROI == "LineSegmentROI":
+                # Click and drag to draw line segment.
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._roiStartPos = self.mapToScene(event.pos())
+                    self._currentLineSegmentROI = LineSegmentROI(self)
+                    self._currentLineSegmentROI.setLine(self._roiStartPos.x(), self._roiStartPos.y(),
+                                                        self._roiStartPos.x(), self._roiStartPos.y())
+                    # Use NoDrag so we can manually update the line as the mouse moves
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    pen = QPen(Qt.GlobalColor.black)
+                    pen.setCosmetic(True)
+                    pen.setWidth(2)  # Set the desired line thickness here
+                    self._currentLineSegmentROI.setPen(pen)
+
+                    self.scene.addItem(self._currentLineSegmentROI)
+
+                    # QGraphicsView.mousePressEvent(self, event)
+                    # Enable live drawing of the line as the mouse moves
+                    event.accept()
+            elif self.drawROI == "PolygonROI":
+                # Click to add points to polygon. Double-click to close polygon.
+                pass
+        elif self.drawROI is None:
+            # Start dragging a region zoom box?
+            if (self.regionZoomButton is not None) and (event.button() == self.regionZoomButton):
+                self._pixelPosition = event.pos()  # store pixel position
+                self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+                QGraphicsView.mousePressEvent(self, event)
+                event.accept()
+                self._isZooming = True
+                return
+            elif (self.selectionButton is not None) and (event.button() == self.selectionButton):
+                print("Going to selection start loop")
+                self._pixelPosition = event.pos()  # store pixel position
+                self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+                QGraphicsView.mousePressEvent(self, event)
+                event.accept()
+                self._isSelecting = True
+                return
+
+        if (self.zoomOutButton is not None) and (event.button() == self.zoomOutButton):
+            if len(self.zoomStack):
+                self.zoomStack.pop()
+                self.updateViewer()
+                self.viewChanged.emit()
+            event.accept()
+            return
+
+        # Start dragging to pan?
+        if (self.panButton is not None) and (event.button() == self.panButton):
+            self._pixelPosition = event.pos()  # store pixel position
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            if self.panButton == Qt.MouseButton.LeftButton:
+                QGraphicsView.mousePressEvent(self, event)
+            else:
+                # ScrollHandDrag ONLY works with LeftButton, so fake it.
+                # Use a bunch of dummy modifiers to notify that event should NOT be handled as usual.
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                dummyModifiers = Qt.KeyboardModifier(Qt.KeyboardModifier.ShiftModifier
+                                                     | Qt.KeyboardModifier.ControlModifier
+                                                     | Qt.KeyboardModifier.AltModifier
+                                                     | Qt.KeyboardModifier.MetaModifier)
+                dummyEvent = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(event.pos()), Qt.MouseButton.LeftButton,
+                                         event.buttons(), dummyModifiers)
+                self.mousePressEvent(dummyEvent)
+            sceneViewport = self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
+            self._scenePosition = sceneViewport.topLeft()
+            event.accept()
+            self._isPanning = True
+            return
+
+        scenePos = self.mapToScene(event.pos())
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.leftMouseButtonPressed.emit(scenePos.x(), scenePos.y())
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.middleMouseButtonPressed.emit(scenePos.x(), scenePos.y())
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.rightMouseButtonPressed.emit(scenePos.x(), scenePos.y())
+
+        QGraphicsView.mousePressEvent(self, event)
+
+    def mouseReleaseEvent(self, event):
+        """ Stop mouse pan or zoom mode (apply zoom if valid).
+        """
+        # Ignore dummy events. e.g., Faking pan with left button ScrollHandDrag.
+        dummyModifiers = Qt.KeyboardModifier(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                                             | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)
+        if event.modifiers() == dummyModifiers:
+            QGraphicsView.mouseReleaseEvent(self, event)
+            event.accept()
+            return
+        # Finish panning
+        if (self.panButton is not None) and (event.button() == self.panButton):
+            if self.panButton == Qt.MouseButton.LeftButton:
+                QGraphicsView.mouseReleaseEvent(self, event)
+            else:
+                # ScrollHandDrag ONLY works with LeftButton, so fake it.
+                # Use a bunch of dummy modifiers to notify that event should NOT be handled as usual.
+                self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                dummyModifiers = Qt.KeyboardModifier(Qt.KeyboardModifier.ShiftModifier
+                                                     | Qt.KeyboardModifier.ControlModifier
+                                                     | Qt.KeyboardModifier.AltModifier
+                                                     | Qt.KeyboardModifier.MetaModifier)
+                dummyEvent = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(event.pos()),
+                                         Qt.MouseButton.LeftButton, event.buttons(), dummyModifiers)
+                self.mouseReleaseEvent(dummyEvent)
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            if len(self.zoomStack) > 0:
+                sceneViewport = self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
+                delta = sceneViewport.topLeft() - self._scenePosition
+                self.zoomStack[-1].translate(delta)
+                self.zoomStack[-1] = self.zoomStack[-1].intersected(self.sceneRect())
+                self.viewChanged.emit()
+            event.accept()
+            self._isPanning = False
+            return
+        # print(self.selectedROI) Will need to later add feature to collect all currently selected ROIs and delete them with right click in selection mode.
+
+        # # Finish drawing ROI
+        if self.drawROI is not None:
+            if self.selectedROI is not None:
+                QGraphicsView.mouseReleaseEvent(self, event)
+                self.selectedROI = None
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                self.deleteROI(self.roiSelected)
+                QGraphicsView.mousePressEvent(self, event)
+                event.accept()
+                return
+            elif self.drawROI == "PointROI":
+                if event.button() == Qt.MouseButton.LeftButton:
+                    # Click to place a point.
+                    self._roiStartPos = self.mapToScene(event.pos())
+                    self._currentPointROI = PointROI(self)
+                    radius = self.size().width() // 100
+                    self._currentPointROI.setRect(self._roiStartPos.x()- radius/2, self._roiStartPos.y()- radius/2,
+                                                  radius, radius)
+                    # Make the ellipse shaded (filled)
+                    # self._currentPointROI.setBrush(QBrush(Qt.GlobalColor.blue, Qt.BrushStyle.SolidPattern))
+                    self.addROIs(self._currentPointROI)
+                    QGraphicsView.mouseReleaseEvent(self, event)
+                    event.accept()
+                    return
+                # elif event.button() == Qt.MouseButton.RightButton:
+                #     self.deleteROI(self.roiSelected)
+                #     QGraphicsView.mousePressEvent(self, event)
+                #     self.roiChanged = "deleted"
+                #     self.roiDict.emit(self.ROIs)
+                #     event.accept()
+                #     return
+            elif self.drawROI == "EllipseROI":
+                # Click and drag to draw ellipse. +Shift for circle.
+                pass
+            elif self.drawROI == "RectROI" and self._currentRectROI and self._roiStartPos:
+                # Click and drag to draw rectangle. +Shift for square.
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._roiEndPos = self.mapToScene(event.pos())  # store end position
+                    dx = self._roiEndPos.x() - self._roiStartPos.x()
+                    dy = self._roiEndPos.y() - self._roiStartPos.y()
+                    if dx == 0 or dy == 0:
+                        # If the rectangle has no area, do not add it.
+                        QGraphicsView.mouseReleaseEvent(self, event)
+                        return
+                    self._currentRectROI.setRect(self._roiStartPos.x(), self._roiStartPos.y(),
+                                                  dx, dy)
+                    # self.ROIs.append(self._currentRectROI)
+                    self.addROIs(self._currentRectROI)
+                    # print(f"New ROI drawn: {self._currentRectROI} with coordinates: {self._currentRectROI.rect()}")
+                    QGraphicsView.mouseReleaseEvent(self, event)
+                    # Send the bbox to parent in format [x, y, width, height] 
+                    # Note that the width and height can be negative if the rectangle is drawn from bottom right to top left.
+                    event.accept()
+                    return
+            
+            elif self.drawROI == "VectorROI":
+                # Click and drag to draw line.
+                if event.button() == Qt.MouseButton.LeftButton and self._currentVectorROI:
+                    self._roiEndPos = self.mapToScene(event.pos())
+                    dx = self._roiEndPos.x() - self._roiStartPos.x()
+                    dy = self._roiEndPos.y() - self._roiStartPos.y()
+                    min_length = 5  # Minimum length in scene units
+                    if math.hypot(dx, dy) >= min_length:
+                        self._currentVectorROI.setLine(self._roiStartPos.x(), self._roiStartPos.y(),
+                                                        self._roiEndPos.x(), self._roiEndPos.y())
+                        self.addROIs(self._currentVectorROI)
+                        # QGraphicsView.mouseReleaseEvent(self, event)
+                        # event.accept()
+                    else:
+                        # If the line is too short, do not add it.
+                        self.scene.removeItem(self._currentVectorROI)
+                self._currentVectorROI = None
+                QGraphicsView.mouseReleaseEvent(self, event)
+                event.accept()
+                return
+            elif self.drawROI == "LineSegmentROI":
+                if event.button() == Qt.MouseButton.LeftButton and self._currentLineSegmentROI:
+                    self._roiEndPos = self.mapToScene(event.pos())
+                    dx = self._roiEndPos.x() - self._roiStartPos.x()
+                    dy = self._roiEndPos.y() - self._roiStartPos.y()
+                    min_length = 5  # Minimum length in scene units
+                    if math.hypot(dx, dy) >= min_length:
+                        self._currentLineSegmentROI.setLine(self._roiStartPos.x(), self._roiStartPos.y(),
+                                                            self._roiEndPos.x(), self._roiEndPos.y())
+                        self.addROIs(self._currentLineSegmentROI)
+                    else:
+                        # If the line segment is too short, do not add it.
+                        self.scene.removeItem(self._currentLineSegmentROI)
+            
+            elif self.drawROI == "PolygonROI":
+                # Click to add points to polygon. Double-click to close polygon.
+                pass
+        
+        elif self.drawROI is None:
+            if (self.regionZoomButton is not None) and (event.button() == self.regionZoomButton):
+                QGraphicsView.mouseReleaseEvent(self, event)
+
+                if self._isZooming: 
+                    zoomRect = self.scene.selectionArea().boundingRect().intersected(self.sceneRect())
+                    self.scene.setSelectionArea(QPainterPath())
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    zoomPixelWidth = abs(event.pos().x() - self._pixelPosition.x())
+                    zoomPixelHeight = abs(event.pos().y() - self._pixelPosition.y())
+                    if zoomPixelWidth > 3 and zoomPixelHeight > 3:
+                        if zoomRect.isValid() and (zoomRect != self.sceneRect()):
+                            self.zoomStack.append(zoomRect)
+                            self.updateViewer()
+                            self.viewChanged.emit()
+                    self._isZooming = False 
+                event.accept()
+                return
+                # zoomRect = self.scene.selectionArea().boundingRect().intersected(self.sceneRect())
+                # # Clear current selection area (i.e. rubberband rect).
+                # self.scene.setSelectionArea(QPainterPath())
+                # self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                # # If zoom box is 3x3 screen pixels or smaller, do not zoom and proceed to process as a click release.
+                # zoomPixelWidth = abs(event.pos().x() - self._pixelPosition.x())
+                # zoomPixelHeight = abs(event.pos().y() - self._pixelPosition.y())
+                # if zoomPixelWidth > 3 and zoomPixelHeight > 3:
+                #     if zoomRect.isValid() and (zoomRect != self.sceneRect()):
+                #         self.zoomStack.append(zoomRect)
+                #         self.updateViewer()
+                #         self.viewChanged.emit()
+                #         event.accept()
+                #         self._isZooming = False
+                #         return
+            elif (self.selectionButton is not None) and (event.button() == self.selectionButton):
+                print("what")
+                QGraphicsView.mouseReleaseEvent(self, event)
+                selectionRect = self.scene.selectionArea().boundingRect().intersected(self.sceneRect())
+                # Clear current selection area (i.e. rubberband rect).
+                self.scene.setSelectionArea(QPainterPath())
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                # If selection box is 3x3 screen pixels or smaller, do not select and proceed to process as a click release.
+                selectPixelWidth = abs(event.pos().x() - self._pixelPosition.x())
+                selectPixelHeight = abs(event.pos().y() - self._pixelPosition.y())
+                print("Going to selection end loop")
+                if selectPixelWidth > 3 and selectPixelHeight > 3:
+                    if selectionRect.isValid() and (selectionRect != self.sceneRect()):
+                        # Emit the selected area coordinates.
+                        self.ROIs_selected = {k: [] for k in self.ROIs.keys()}
+                        for roi_type, roi_list in self.ROIs.items():
+                            for roi in roi_list:
+                                # For RectROI and EllipseROI, use boundingRect; for VectorROI, use line's boundingRect
+                                if hasattr(roi, "boundingRect"):
+                                    roi_rect = roi.mapToScene(roi.boundingRect()).boundingRect()
+                                elif hasattr(roi, "line"):
+                                    roi_rect = roi.mapToScene(roi.line().boundingRect()).boundingRect()
+                                else:
+                                    continue
+                                if selectionRect.contains(roi_rect):
+                                    self.ROIs_selected[roi_type].append(roi)
+                        self.roiSelected.emit([self.ROIs_selected])
+                        print(f"Selected ROIs: {self.ROIs_selected}")
+                        event.accept()
+                        self._isSelecting = False
+                        return
+
+        
+
+        scenePos = self.mapToScene(event.pos())
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.leftMouseButtonReleased.emit(scenePos.x(), scenePos.y())
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.middleMouseButtonReleased.emit(scenePos.x(), scenePos.y())
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.rightMouseButtonReleased.emit(scenePos.x(), scenePos.y())
+
+        QGraphicsView.mouseReleaseEvent(self, event)
+
+    def mouseDoubleClickEvent(self, event):
+        """ Show entire image.
+        """
+        # Zoom out on double click?
+        if (self.zoomOutButton is not None) and (event.button() == self.zoomOutButton):
+            self.clearZoom()
+            event.accept()
+            return
+
+        scenePos = self.mapToScene(event.pos())
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.leftMouseButtonDoubleClicked.emit(scenePos.x(), scenePos.y())
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.rightMouseButtonDoubleClicked.emit(scenePos.x(), scenePos.y())
+
+        QGraphicsView.mouseDoubleClickEvent(self, event)
+
+    def wheelEvent(self, event):
+        if self.wheelZoomFactor is not None:
+            if self.wheelZoomFactor == 1:
+                return
+            if event.angleDelta().y() < 0:
+                # zoom in
+                if len(self.zoomStack) == 0:
+                    self.zoomStack.append(self.sceneRect())
+                elif len(self.zoomStack) > 1:
+                    del self.zoomStack[:-1]
+                zoomRect = self.zoomStack[-1]
+                center = zoomRect.center()
+                zoomRect.setWidth(zoomRect.width() / self.wheelZoomFactor)
+                zoomRect.setHeight(zoomRect.height() / self.wheelZoomFactor)
+                zoomRect.moveCenter(center)
+                self.zoomStack[-1] = zoomRect.intersected(self.sceneRect())
+                self.updateViewer()
+                self.viewChanged.emit()
+            else:
+                # zoom out
+                if len(self.zoomStack) == 0:
+                    # Already fully zoomed out.
+                    return
+                if len(self.zoomStack) > 1:
+                    del self.zoomStack[:-1]
+                zoomRect = self.zoomStack[-1]
+                center = zoomRect.center()
+                zoomRect.setWidth(zoomRect.width() * self.wheelZoomFactor)
+                zoomRect.setHeight(zoomRect.height() * self.wheelZoomFactor)
+                zoomRect.moveCenter(center)
+                self.zoomStack[-1] = zoomRect.intersected(self.sceneRect())
+                if self.zoomStack[-1] == self.sceneRect():
+                    self.zoomStack = []
+                self.updateViewer()
+                self.viewChanged.emit()
+            event.accept()
+            return
+
+        QGraphicsView.wheelEvent(self, event)
+
+    def mouseMoveEvent(self, event):
+        # Emit updated view during panning.
+        # Update live vector ROI preview while dragging
+        if self.drawROI == "VectorROI" and getattr(self, "_currentVectorROI", None) and (event.buttons() & Qt.MouseButton.LeftButton):
+            currentPos = self.mapToScene(event.pos())
+            self._currentVectorROI.setPen(QPen(self._currentVectorROI.pen().color(), 3))
+            self._currentVectorROI.setLine(
+                self._roiStartPos.x(), self._roiStartPos.y(),
+                currentPos.x(), currentPos.y(), 
+            )
+        elif self.drawROI == "LineSegmentROI" and getattr(self, "_currentLineSegmentROI", None) and (event.buttons() & Qt.MouseButton.LeftButton):
+            currentPos = self.mapToScene(event.pos())
+            self._currentLineSegmentROI.setPen(QPen(self._currentLineSegmentROI.pen().color(), 3))
+            self._currentLineSegmentROI.setLine(
+                self._roiStartPos.x(), self._roiStartPos.y(),
+                currentPos.x(), currentPos.y(), 
+            )
+        if self._isPanning:
+            QGraphicsView.mouseMoveEvent(self, event)
+            if len(self.zoomStack) > 0:
+                sceneViewport = self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
+                delta = sceneViewport.topLeft() - self._scenePosition
+                self._scenePosition = sceneViewport.topLeft()
+                self.zoomStack[-1].translate(delta)
+                self.zoomStack[-1] = self.zoomStack[-1].intersected(self.sceneRect())
+                self.updateViewer()
+                self.viewChanged.emit()
+
+        scenePos = self.mapToScene(event.pos())
+        if self.sceneRect().contains(scenePos):
+            # Pixel index offset from pixel center.
+            x = int(round(scenePos.x() - 0.5))
+            y = int(round(scenePos.y() - 0.5))
+            imagePos = QPoint(x, y)
+        else:
+            # Invalid pixel position.
+            imagePos = QPoint(-1, -1)
+        self.mousePositionOnImageChanged.emit(imagePos)
+
+        QGraphicsView.mouseMoveEvent(self, event)
+
+    def enterEvent(self, event):
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def leaveEvent(self, event):
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def addROIs(self, roi, setColor=None, labelOverride=None):
+        """ Add a ROI to the viewer.
+        :param roi: The ROI item to add.
+        """
+        roiType = roi.__class__.__name__
+        if roiType == 'VectorROI':
+            self._currentLabel = 'Empty Label'
+            if labelOverride is None:
+                setColor = "#000000"  # Black for lines
+        if labelOverride is not None:
+            self._currentLabel = labelOverride
+        i = self._labelList.index(self._currentLabel)+1 if self._currentLabel in self._labelList else 0
+        if setColor:
+            color = QColor(setColor) 
+        else:    
+            color = self.colorList[i]
+        pen = QPen(color)
+        pen.setWidth(2)  # Set the desired line thickness here
+        pen.setCosmetic(True)
+        roi.setPen(pen)
+        self.scene.addItem(roi)
+        self.ROIs[roiType].append(roi)
+        # self.roiDict.emit(self.ROIs)
+        if self.roiChanged == "loaded":
+            return
+        else:
+            self.roiChanged = "added"
+            self.roiList.emit([roi])
+        # self.roiSelected.emit([roi])
+
+    def deleteROI(self, roi):
+        """ Delete a single ROI from the viewer.
+        :param roi: The ROI to delete.
+        """
+        # roiType = roi.__class__.__name__
+        # if hasattr(roiType, "pyqtBoundSignal"):
+            # roiType is a pyqtBoundSignal, cannot use it as a key
+        roiType = self.drawROI
+        if roiType is None:
+            roiType = roi.__class__.__name__
+        if roi in self.ROIs[roiType]:
+            self.scene.removeItem(roi)
+            self.ROIs[roiType].remove(roi)
+            # print(f"Deleted ROI: {roi}")
+            self.roiChanged = "deleted"
+            # self.roiDict.emit(self.ROIs)
+            self.roiList.emit([roi])
+            del roi
+
+    def clearROIs(self):
+        """ Clear all ROIs from the viewer.
+        """
+        if any(len(rois) > 0 for rois in self.ROIs.values()):
+            for roiType in self.ROIs:
+                for roi in self.ROIs[roiType]:
+                    self.scene.removeItem(roi)
+                self.ROIs[roiType].clear()
+
+    def roiClicked(self, roi):
+    # Need to be able to get the roiType from the clicked ROI from its object class
+        """ Handle ROI click events.
+        :param roi: The clicked ROI item.
+        """
+        roiType = roi.__class__.__name__
+
+        # if roiType != self.drawROI:
+        #     return  # Ignore clicks on ROIs that are not of the current drawROI type or with selection mode active
+        
+        print(f"ROI clicked: {roi}")
+
+        for object in self.ROIs[roiType]:
+            if roi is object:
+                self.roiSelected.emit([roi])
+                break
+
+    def setROIsAreMovable(self):
+        for roiType, roiList in self.ROIs.items():
+            if roiType == self.drawROI or self.drawROI is None:
+                for roi in roiList:
+                    roi.setFlags(roi.flags() | QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+                    roi.setFlags(roi.flags() | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+
+            else:
+                for roi in roiList:
+                    roi.setFlags(roi.flags() & ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+                    roi.setFlags(roi.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+
+
+    def loadROIs(self, df, image, method):
+        """ Load ROIs from a DataFrame.
+        :param df: The DataFrame containing ROI data.
+        """
+        self.roiChanged = method
+        # required_keys = {'file', 'type', 'x1', 'y1', 'dx', 'dy', 'label', 'objectName' }
+        # missing_keys = required_keys - set(df.columns)
+        # if missing_keys:
+        #     raise ValueError(f"DataFrame is missing required keys: {missing_keys}")
+        for index, row in df.iterrows():
+            self._currentLabel = row['label'] if 'label' in row else "Empty Label"
+            if row['file'] == image:
+                if row['type'] == 'EllipseROI':
+                    roi = EllipseROI(self)
+                    roi.setRect(row['x1'], row['y1'], row['dx'], row['dy'])
+                    self.addROIs(roi)
+                elif row['type'] == 'PointROI':
+                    roi = PointROI(self)
+                    # print("Current viewer size:", self.size())
+                    # radius = self.size().width() // 50  # Set radius to 1/50th of the viewer width
+                    radius = 10  # Fixed radius for point ROI
+                    roi.setRect(row['x1']-radius/2, row['y1']-radius/2, radius, radius)
+                    self.addROIs(roi)
+                elif row['type'] == 'VectorROI':
+                    roi = VectorROI(self)
+                    #dx is actually x2 and dy is actually y2
+                    roi.setLine(row['x1'], row['y1'], row['dx'], row['dy'])
+                    self.addROIs(roi)
+                elif row['type'] == 'LineSegmentROI':
+                    roi = LineSegmentROI(self)
+                    roi.setLine(row['x1'], row['y1'], row['x1'] + row['dx'], row['y1'] + row['dy'])
+                    self.addROIs(roi)
+                # elif row['type'] == 'Polygon':
+                #     roi = PolygonROI(self)
+                #     # polygon = QPolygonF()
+                #     for point in row['points']:
+                #         polygon.append(QPointF(point[0], point[1]))
+                #     roi.setPolygon(polygon)
+                #     self.addROIs([roi])
+                elif row['type'] == 'RectROI':
+                    roi = RectROI(self)
+                    roi.setRect(row['x1'], row['y1'], row['dx'], row['dy'])
+                    self.addROIs(roi)
+        # except Exception as e:
+        #     print(f"Error loading ROIs: {e}")
+        
+
+
+class EllipseROI(QGraphicsEllipseItem):
+
+    def __init__(self, viewer):
+        QGraphicsItem.__init__(self)
+        self._viewer = viewer
+        pen = QPen(Qt.GlobalColor.blue)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setFlags(self.GraphicsItemFlag.ItemIsSelectable | self.GraphicsItemFlag.ItemIsMovable)
+
+    def mousePressEvent(self, event):
+        QGraphicsItem.mousePressEvent(self, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.roiClicked(self)
+        if event.button() == Qt.MouseButton.RightButton:
+            # Right-click to delete the ROI
+            self._viewer.deleteROI(self)
+
+class PointROI(QGraphicsEllipseItem):
+
+    def __init__(self, viewer):
+        QGraphicsItem.__init__(self)
+        self._viewer = viewer
+        pen = QPen(Qt.GlobalColor.blue)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setFlags(self.GraphicsItemFlag.ItemIsSelectable | self.GraphicsItemFlag.ItemIsMovable)
+
+    def mousePressEvent(self, event):
+        QGraphicsItem.mousePressEvent(self, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.roiClicked(self)
+        if event.button() == Qt.MouseButton.RightButton:
+            # Right-click to delete the ROI
+            self._viewer.deleteROI(self)
+
+class RectROI(QGraphicsRectItem):
+
+    def __init__(self, viewer):
+        QGraphicsItem.__init__(self)
+        self._viewer = viewer
+        pen = QPen(Qt.GlobalColor.yellow)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setFlags(self.GraphicsItemFlag.ItemIsSelectable | self.GraphicsItemFlag.ItemIsMovable)
+        
+        # Enable hover events
+        self.setAcceptHoverEvents(True)
+        
+        # Store default and hover brushes
+        self._defaultBrush = QBrush(Qt.BrushStyle.NoBrush)  # No fill by default
+        self._hoverBrush = QBrush(Qt.GlobalColor.gray, Qt.BrushStyle.SolidPattern)
+        self._hoverBrush.setColor(Qt.GlobalColor.gray)
+        # Make the hover color semi-transparent
+        color = self._hoverBrush.color()
+        color.setAlpha(100)  # Set opacity (0-255, where 100 is about 40% opacity)
+        self._hoverBrush.setColor(color)
+        
+        # Set initial brush to default (no fill)
+        self.setBrush(self._defaultBrush)
+
+    def hoverEnterEvent(self, event):
+        """Called when mouse enters the rectangle"""
+        self.setBrush(self._hoverBrush)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        """Called when mouse leaves the rectangle"""
+        self.setBrush(self._defaultBrush)
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        QGraphicsItem.mousePressEvent(self, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.roiClicked(self)
+        if event.button() == Qt.MouseButton.RightButton:
+            # Right-click to delete the ROI
+            self._viewer.deleteROI(self)
+
+
+class VectorROI(QGraphicsLineItem):
+    """A line ROI that displays an arrowhead at the end, making it a vector/arrow."""
+
+    def __init__(self, viewer):
+        QGraphicsItem.__init__(self)
+        self._viewer = viewer
+        pen = QPen(Qt.GlobalColor.black)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setFlags(self.GraphicsItemFlag.ItemIsSelectable | self.GraphicsItemFlag.ItemIsMovable)
+        self.arrow_size = 3  # Length of the arrowhead
+
+    def paint(self, painter, option, widget=None):
+        # Draw the line
+        super().paint(painter, option, widget)
+        # Draw the arrowhead
+        line = self.line()
+        if line.length() == 0:
+            return
+        # Calculate arrowhead points
+        angle = math.atan2(line.dy(), line.dx())
+        p2 = line.p2()
+        # Arrowhead points
+        arrow_p1 = p2 - QPointF(
+            self.arrow_size * math.cos(angle - math.pi / 6),
+            self.arrow_size * math.sin(angle - math.pi / 6)
+        )
+        arrow_p2 = p2 - QPointF(
+            self.arrow_size * math.cos(angle + math.pi / 6),
+            self.arrow_size * math.sin(angle + math.pi / 6)
+        )
+        arrow_head = [p2, arrow_p1, arrow_p2]
+        painter.setBrush(self.pen().color())
+        painter.drawPolygon(*arrow_head)
+
+    def mousePressEvent(self, event):
+        if self._viewer.drawROI == "VectorROI" and getattr(self._viewer, "_currentVectorROI", None) is self:
+            event.ignore()
+            return
+        
+        QGraphicsItem.mousePressEvent(self, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.roiClicked(self)
+        if event.button() == Qt.MouseButton.RightButton:
+            # Right-click to delete the ROI
+            self._viewer.deleteROI(self)
+
+class LineSegmentROI(QGraphicsLineItem):
+    """A line segment ROI."""
+
+    def __init__(self, viewer):
+        QGraphicsItem.__init__(self)
+        self._viewer = viewer
+        pen = QPen(Qt.GlobalColor.black)
+        pen.setCosmetic(True)
+        pen.width = 3  # Set the desired line thickness here
+        self.setPen(pen)
+        self.setFlags(self.GraphicsItemFlag.ItemIsSelectable | self.GraphicsItemFlag.ItemIsMovable)
+
+    def paint(self, painter, option, widget=None):
+        # Draw the line
+        super().paint(painter, option, widget)
+        line = self.line()
+        if line.length() == 0:
+            return
+       
+    def mousePressEvent(self, event):
+        if self._viewer.drawROI == "LineSegmentROI" and getattr(self._viewer, "_currentLineSegmentROI", None) is self:
+            event.ignore()
+            return
+        
+        QGraphicsItem.mousePressEvent(self, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.roiClicked(self)
+        if event.button() == Qt.MouseButton.RightButton:
+            # Right-click to delete the ROI
+            self._viewer.deleteROI(self)
+
+class PolygonROI(QGraphicsPolygonItem):
+
+    def __init__(self, viewer):
+        QGraphicsItem.__init__(self)
+        self._viewer = viewer
+        pen = QPen(Qt.GlobalColor.yellow)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setFlags(self.GraphicsItemFlag.ItemIsSelectable | self.GraphicsItemFlag.ItemIsMovable)
+
+    def mousePressEvent(self, event):
+        QGraphicsItem.mousePressEvent(self, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._viewer.roiClicked(self)
+
+
+if __name__ == '__main__':
+    import sys
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        from PyQt5.QtWidgets import QApplication
+
+    def handleViewChange():
+        print("viewChanged")
+
+    # Create the application.
+    app = QApplication(sys.argv)
+
+    # Create image viewer.
+    viewer = QtImageViewer()
+
+    # Open an image from file.
+    viewer.open()
+
+    # Show viewer and run application.
+    viewer.show()
+    sys.exit(app.exec())

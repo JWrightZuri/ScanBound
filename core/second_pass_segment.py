@@ -207,7 +207,7 @@ def find_blobs(image, plot_results=False):
             # Draw a line between smallest centroid and neighbor centroid
             y0, x0 = neighbor_centroid
             y1, x1 = props[smallest_idx].centroid
-            vector_interface = np.array([x0, y0, x1, y1]) # x0, y0, x1, y1
+            vector_interface = np.array([x0, y0, x1, y1]) # Largest to smallest lobe
             vector_interface = vector_interface / 10
             if plot_results:
                 ax[3].arrow(x0, y0, x1 - x0, y1 - y0, color='red', linewidth=2)
@@ -239,6 +239,6 @@ def find_blobs(image, plot_results=False):
 
 if __name__ == "__main__":
     # Load a sample image
-    image = imread(r"C:\Users\wrja\Desktop\stm_analysis_project\data\user_data\molecules\test7.png", as_gray=True)
+    image = imread(r"C:\Users\wrja\Desktop\ScanBound\data\user_data\L240427_171746_region10001_9AP.png", as_gray=True)
     chirality, vectors = run_second_pass_segment(image, plot_results=True)
     # print(f"Chirality: {chirality}, Vectors: {vectors}")

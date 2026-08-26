@@ -1,3 +1,5 @@
+from tkinter import Image
+
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
 from ui.PyQtImageViewer.QtImageViewer import QtImageViewer
 from PyQt6 import QtCore
@@ -50,10 +52,11 @@ class SPMImageProcess(QWidget):
         self.ui.listWidget.itemSelectionChanged.connect(self.display_selected_image)
         self.ui.listWidget_2.itemSelectionChanged.connect(self.update_selected_channel)
         self.ui.pushButton_4.clicked.connect(self.image_processing_ui_show)
-        self.ui.checkBox_2.stateChanged.connect(self.showScaleBar)
+        self.ui.checkBox_2.stateChanged.connect(self.changeScaleBarState)
         self.ui.pushButton_6.clicked.connect(self.send_to_imageLabeling)
         self.ui.pushButton_7.clicked.connect(self.save_image)
         self.ui.pushButton_15.clicked.connect(self.save_all_images)
+        self.ui.pushButton_8.clicked.connect(self.copy_to_clipboard)
 
         # Set up the image processing UI
         self.process_image_ui = Ui_imageProcessing()
@@ -306,6 +309,7 @@ class SPMImageProcess(QWidget):
         self.ui.stackedWidget.setCurrentIndex(self.selected_index)
         self.current_viewer = self.ui.stackedWidget.currentWidget()
         self.showImageStats()
+        self.showScaleBar()
         if initialize is True:
             if self.spm_objects:
                 self.display_channels()
@@ -362,21 +366,18 @@ class SPMImageProcess(QWidget):
         full_path = os.path.join(self.saved_output_dir, file)
          
 
-        # We have two methods to save, one via QImage 
-        # and one via matplotlib (first converting back to ndarray)
-        # First is simpler and quicker
-        # Second will be used for adding scale bars, titles, axes, etc.
-        self.current_viewer.image().save(full_path, format='JPG', quality=100)
-        # fig = plt.figure()
-        # print("Saving image:", file)  
-        # image = self.current_viewer.returnImage()
+        # self.current_viewer.image().save(full_path, format='JPG', quality=100, )
 
-        # ax = fig.gca()
-        # ax.axis('off')  # Hide axes
-        # ax.set_title("")  # Remove title
-        # ax.imshow(image, cmap='gray')
-        # plt.savefig(full_path, bbox_inches='tight', pad_inches=0, dpi=500)
-        # plt.close(fig)
+        # Capture the visible viewer contents so any scene items/overlays
+        # (such as scale bars or annotations) are included in the saved image.
+        from PyQt6.QtGui import QImage, QPainter
+
+        output_image = self.current_viewer.image()
+        scene = self.current_viewer.scene
+        painter = QPainter(output_image)
+        scene.render(painter)
+        painter.end()
+        output_image.save(full_path, format='JPG', quality=100)
 
         # Additionally append metadata to a text file
         metadata_file = os.path.join(self.saved_output_dir, 'metadata.csv')
@@ -410,29 +411,113 @@ class SPMImageProcess(QWidget):
                     "Pixel Scale Y (nm)": pxScaleY
                 })
                 # f.write("Date: {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))))
+        return full_path  # Return the path of the saved image for confirmation
 
     def save_all_images(self):
         """
         Save all images in the current directory with modifications applied.
         """
+        starting_index = self.selected_index  # Store the starting index to return to it later
         for idx, spm_obj in enumerate(self.spm_objects):
             self.selected_index = idx
             self.current_viewer = self.ui.stackedWidget.widget(idx)
+            if self.scaleBarActive:
+                self.showScaleBar()
             self.selected_channel_name = self.selected_channel_name if self.selected_channel_name else 'Z'
             self.save_image()
+        self.selected_index = starting_index  # Return to the starting index
+        self.current_viewer = self.ui.stackedWidget.widget(self.selected_index)
         self.updateBrowserText("All images saved successfully.")
+
+    def getImageStats(self, spm_object):
+        """
+        Get image statistics such as pixel scale and scan dimensions.
+        :param spm_object: SPM image object
+        :return: Dictionary containing pixel scale and scan dimensions
+        """
+        pxScale_og = spm_object.pxs()
+        pxScaleX = pxScale_og[0][0]
+        pxScaleY = pxScale_og[1][0]
+        pxScaleUnit = pxScale_og[0][1]
+        objectSizeX = spm_object.size['pixels']['x']
+        objectSizeY = spm_object.size['pixels']['y']
+
+        return {
+            "Pixel Scale X": pxScaleX,
+            "Pixel Scale Y": pxScaleY,
+            "Pixel Scale Unit": pxScaleUnit,
+            "Scan Dimension X (nm)": objectSizeX,
+            "Scan Dimension Y (nm)": objectSizeY
+        }
 
     def showImageStats(self):
         if self.current_viewer:
-            spm_object = self.spm_objects[self.selected_index-1].get_channel('Z')
+            spm_object = self.spm_objects[self.selected_index].get_channel('Z')
             # if spm_obj.header['SCAN_DIR'][0][0] == 'up':
             #     img_channel_mod = np.flipud(img_channel_mod)
-            pxScale_og = spm_object.pxs()
-            pxScaleX = pxScale_og[0][0]
-            pxScaleY = pxScale_og[1][0]
-            pxScaleUnit = pxScale_og[0][1]
+            
+            pxScaleX, pxScaleY, pxScaleUnit, objectSizeX, objectSizeY = self.getImageStats(spm_object).values()
             self.ui.label_5.setText(f"Pixel scale: 1 Pixel = {pxScaleX:.5g} {pxScaleY:.5g} {pxScaleUnit}")
-            self.ui.label_6.setText(f"Scan Dim: {spm_object.size['pixels']['x']*pxScaleX:.5g} x {spm_object.size['pixels']['y']*pxScaleY:.5g} nm")
+            self.ui.label_6.setText(f"Scan Dim: {objectSizeX*pxScaleX:.5g} x {objectSizeY*pxScaleY:.5g} nm")
+            
+    def changeScaleBarState(self, state):
+        self.scaleBarActive = not self.scaleBarActive
+        self.showScaleBar()  # Update the scale bar visibility based on the new state
+
+    def showScaleBar(self):
+        if self.current_viewer is None:
+            return
+        if self.scaleBarActive:
+            pxScaleX, pxScaleY, pxScaleUnit, objectSizeX, objectSizeY = self.getImageStats(self.spm_objects[self.selected_index].get_channel('Z')).values()
+            
+            scaleLength = objectSizeX * pxScaleX  # Length of the scale bar in nm
+            actual_px_height = self.current_viewer.image().size().height() # Needed for incomplete scans
+            import math
+            # Optimize the length of the scale bar to be a reasonable fraction of the image width
+            target_fraction=0.2
+            min_fraction=0.05
+            max_fraction=0.4
+            allowed_sizes=[0.1, 0.5, 1.0, 5.0, 10.0, 20.0]
+            target_len = scaleLength * target_fraction
+            # Only consider bars that actually fit reasonably in the frame
+            valid = [s for s in allowed_sizes
+                    if min_fraction * scaleLength <= s <= max_fraction * scaleLength]
+
+            if not valid:
+                # Nothing fits the fraction window -- fall back to whatever
+                # allowed size is closest to the image width itself, clipped
+                # to the smallest/largest option.
+                valid = allowed_sizes
+
+            # Compare in log-space so ratio-distance matters, not absolute distance
+            bestScale = min(valid, key=lambda s: abs(math.log(s) - math.log(target_len)))
+            print()
+            self.current_viewer.addTextOverlay(f"{bestScale:.5g} nm", 2, actual_px_height - 40, font_size=14, color = self.current_viewer.colorList[-2])
+            self.current_viewer.addScaleBar(x = 5, y = actual_px_height - 15, length= objectSizeX * (bestScale / scaleLength), height=10, color=self.current_viewer.colorList[-2], thickness= actual_px_height * 0.005)
+
+        elif self.current_viewer is not None:
+            self.current_viewer.removeItems()
+
+    def copy_to_clipboard(self):
+        if self.current_viewer is None:
+            return
+        full_path = self.save_image()  # Save the current image first
+        
+        # Now copy the saved image to the clipboard
+        from PIL import Image
+        import io
+        import win32clipboard
+
+        image = Image.open(full_path)
+        output = io.BytesIO()
+        image.convert("RGB").save(output, "BMP")
+        data = output.getvalue()[14:]  # BMP file header is 14 bytes,
+        output.close()
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+        win32clipboard.CloseClipboard()
+
 
     def image_processing_ui_show(self):
         """
@@ -511,11 +596,7 @@ class SPMImageProcess(QWidget):
         self.cmap = self.ui.comboBox.currentText()
         self.update_image(channel_name=self.selected_channel_name, initialize=False, modify=self.checkedMods)
 
-    def showScaleBar(self):
-        self.updateBrowserText("Showing scale bar.")
-        self.scaleBarActive = not self.scaleBarActive
-        # if self.current_viewer:
-        #     self.current_viewer.setScaleBarVisible(self.scaleBarActive)
+   
 
     def correct_slope(self, spmImage):
         # Correct the image by subtracting a fitted slope along the y-axis
