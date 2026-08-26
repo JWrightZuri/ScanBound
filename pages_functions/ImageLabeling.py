@@ -113,7 +113,7 @@ class ImageLabeling(QWidget):
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
         # Auto load data (temporary)
-        self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\GNR_files\20260716_AuMica_694a_44974_44980_44981\saved_output")
+        # self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\GNR_files\20260716_AuMica_694a_44974_44980_44981\saved_output")
         self.autoVector = False
         self.colorList = [
         QColor("#D81B60"),       # Custom color (hex code)

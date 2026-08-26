@@ -14,16 +14,16 @@ Alternatively, download the code as a zip file, and extract it somewhere on your
 ### 2. Perform the Automated Setup
 Run the setup script based on your operating system:
 
-Windows: Double-click **setup.bat** or run **.\setup.bat** in Terminal. /n
+Windows: Double-click **setup.bat** or run **.\setup.bat** in Terminal. 
 
 Mac/Linux: Run **chmod +x setup.sh** && **./setup.sh** in Terminal.
 
-This will create a python virtual environment (spm-venv) containing all required packages.
+This will create a python virtual environment (venv) containing all required packages.
 
 ### 3. Run the Application
 Activate the python virtual environment:
 
-Windows: **.\venv\Scripts\activate** \n
+Windows: **.\venv\Scripts\activate** 
 
 Mac/Linux: **source venv/bin/activate**
 
