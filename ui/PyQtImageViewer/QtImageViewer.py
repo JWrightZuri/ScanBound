@@ -126,6 +126,7 @@ class QtImageViewer(QGraphicsView):
         self._labelList = []
         self._imgShape = []
         self._pxScale = None
+        self._imgPath = None
         self._currentLabel = "Empty Label"
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 

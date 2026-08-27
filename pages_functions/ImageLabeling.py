@@ -180,7 +180,7 @@ class ImageLabeling(QWidget):
         if self.annotations_df is not None:
             self.annotations_df = self.annotations_df[0:0]  # Clear existing annotations
         self.load_images()
-        self.autoSetScale()
+        self.get_scan_dim()  # Load the pixel scale for each image based on metadata
 
     def updateBrowserText(self, text):
         self.browserText.append(text)
@@ -207,6 +207,7 @@ class ImageLabeling(QWidget):
             viewer.leftMouseButtonReleased.connect(handleLeftClick)
             viewer.roiList.connect(self.roiUpdate)
             viewer.roiSelected.connect(self.roiSelection)
+            viewer._imgPath = path  # Store the image path in the viewer instance
             self.ui.stackedWidget.addWidget(viewer)
             self.ui.label_2.setText("Press the box button to draw bounding boxes on the image")
 
@@ -251,9 +252,12 @@ class ImageLabeling(QWidget):
                 label = selected_roi.iloc[0]['label']
         # print(f"Clicked ROI: {selected_roi}, associated label: {label}")
         # print(selected_roi.iloc[0]['type'])
-        if selected_roi.iloc[0]['type'] == 'LineSegmentROI' and self.current_viewer._pxScale is not None:
-            segLength, r_squared, linearity = self.computeLineSegLength(selected_roi)
-            self.updateBrowserText(f"Selected segment stats: \n L={segLength:.2f} nm, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
+        if selected_roi.iloc[0]['type'] == 'LineSegmentROI':
+            segLength_nm, segLength, r_squared, linearity = self.computeLineSegLength(selected_roi)
+            if  self.current_viewer._pxScale is not None:
+                self.updateBrowserText(f"Selected segment stats: \n L={segLength_nm:.2f} nm, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
+            else:
+                self.updateBrowserText(f"Selected segment stats: \n L={segLength:.2f} pixels, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
 
 
         # Find the label in listWidget_2 and select it, or select "Empty Label" if not found
@@ -374,7 +378,7 @@ class ImageLabeling(QWidget):
         # scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to nm scale for current image.")
         ok = False
         scale_factor = None
-        scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to nm scale for current image.", "Scale (nm/pixel):", 0.1, 0.01, 100, 2, step=0.01)
+        scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to nm scale for current image.", "Scale (nm/pixel):", 0.1, 0.001, 100, 2, step=0.001)
 
         if ok:
             self.current_viewer = self.ui.stackedWidget.currentWidget()
@@ -386,52 +390,65 @@ class ImageLabeling(QWidget):
                             f"Scale: {scale_factor:.2f} nm/pixel \n "
                             f"({width_real:.1f} x {height_real:.1f} nm)"
                         )
+            
+            metadata_file = os.path.join(self.data_dir, 'metadata.csv')
+            file = os.path.basename(self.current_viewer._imgPath)
+            channel = 'N/A'  # Placeholder for channel information
+            writeHeader = False
+            writeLine = False
+            if not os.path.exists(metadata_file):
+                writeHeader = True
+                writeLine = True
+            else:
+                # Only append metadata if filename is not already present --- Need to see how to properly do this, should I overwrite existing entries or force the first to remain?
+                with open(metadata_file, 'r') as f:
+                    if file not in f.read():
+                        writeLine = True
+            if writeLine:
+                with open(metadata_file, 'a', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=[
+                                    "Filename", "Channel", "Modifications", "Dimensions", "Pixel Scale X (nm)", "Pixel Scale Y (nm)"
+                                    ])
+                    if writeHeader:
+                        writer.writeheader()
+                    writer.writerow({
+                        "Filename": file,
+                        "Channel": channel,
+                        "Modifications": '',
+                        "Dimensions": f"{self.current_viewer._imgShape[0]} x {self.current_viewer._imgShape[1]}",
+                        "Pixel Scale X (nm)": self.current_viewer._pxScale,
+                        "Pixel Scale Y (nm)": self.current_viewer._pxScale
+                        })
+
     
     def autoSetScale(self):
         """
         Automatically set the scale based on the metadata of the current image.
         """
         self.current_viewer = self.ui.stackedWidget.currentWidget()
-        # Try to set scale from metadata_dict if filename matches
-        filename = None
-        current_index = self.ui.stackedWidget.currentIndex()
-        if 0 <= current_index < len(self.image_paths):
-            filename = os.path.basename(self.image_paths[current_index])
 
-        if self.metadata_dict:
-            pixel_size_x, width_real, height_real = self.get_scan_dim(filename)
-            if pixel_size_x is not None:
-                        self.ui.label_5.setText(
-                            f"Scale: {pixel_size_x:.2f} nm/pixel \n "
-                            f"({width_real:.1f} x {height_real:.1f} nm)"
-                        )
-                        self.current_viewer._pxScale = pixel_size_x
+        if self.current_viewer._pxScale is not None:
+            self.ui.label_5.setText(
+                f"Scale: {self.current_viewer._pxScale:.2f} nm/pixel \n "
+                f"({self.current_viewer._imgShape[0] * self.current_viewer._pxScale:.1f} x {self.current_viewer._imgShape[1] * self.current_viewer._pxScale:.1f} nm)"
+            )
         else:
-            if self.current_viewer._pxScale is not None:
-                self.ui.label_5.setText(
-                    f"Scale: {self.current_viewer._pxScale:.2f} nm/pixel \n "
-                    f"({self.current_viewer._imgShape[0] * self.current_viewer._pxScale:.1f} x {self.current_viewer._imgShape[1] * self.current_viewer._pxScale:.1f} nm)"
-                )
             self.ui.label_5.setText("Scale: Please set manually.")
         
 
-    def get_scan_dim(self, filename):
-        if self.metadata_dict and 'Filename' in self.metadata_dict and 'Pixel Scale X (nm)' in self.metadata_dict:
-            if filename in self.metadata_dict['Filename']:
-                idx = self.metadata_dict['Filename'].index(filename)
-                pixel_size_x = self.metadata_dict['Pixel Scale X (nm)'][idx]
-                pixel_size_y = self.metadata_dict['Pixel Scale Y (nm)'][idx]
-                # self.ui.label_5.setText(f"Scale: {pixel_size:.5f} nm/pixel")
-                # Show image dimensions in real units (width x height)
-                width_px = int(str(self.metadata_dict['Dimensions'][idx]).split('x')[0])
-                height_px = int(str(self.metadata_dict['Dimensions'][idx]).split('x')[1])
-                width_real = width_px * pixel_size_x
-                height_real = height_px * pixel_size_y
+    def get_scan_dim(self):
+        for viewer in self.ui.stackedWidget.findChildren(QtImageViewer):
+            filename = os.path.basename(viewer._imgPath)
+            if self.metadata_dict and 'Filename' in self.metadata_dict and 'Pixel Scale X (nm)' in self.metadata_dict:
+                if filename in self.metadata_dict['Filename']:
+                    idx = self.metadata_dict['Filename'].index(filename)
+                    pixel_size_x = self.metadata_dict['Pixel Scale X (nm)'][idx]
+                    pixel_size_y = self.metadata_dict['Pixel Scale Y (nm)'][idx]
+                    viewer._pxScale = pixel_size_x
+                else:
+                    viewer._pxScale = None
             else:
-                return None, None, None
-        else:
-            return None, None, None
-        return pixel_size_x, width_real, height_real
+                viewer._pxScale = None
 
     def label_ui_show(self):
         """
@@ -749,10 +766,8 @@ class ImageLabeling(QWidget):
                 roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
 
             if roiType == "LineSegmentROI":
-                print(roi)
                 linePointList = []
                 for point in roi._points:
-                    print(point)
                     x1 = point.x()
                     y1 = point.y()
                     dx = 0
@@ -1395,7 +1410,7 @@ class ImageLabeling(QWidget):
                         if norm_v == 0 or norm_sym == 0:
                             angle_deg = None
                         else:
-                            print(f"Vector {i}: v={v}, sym_vec={sym_vec}")
+                            # print(f"Vector {i}: v={v}, sym_vec={sym_vec}")
                             # angle_rad = np.arctan2(np.cross(sym_vec, v), np.dot(sym_vec, v))
                             # angle_deg = np.degrees(angle_rad) % 360 
                             angle1 = np.arctan2(v[1], v[0])
@@ -1540,8 +1555,6 @@ class ImageLabeling(QWidget):
         self.updateBrowserText(f"Average GNR length: {gnr_avg_length:.2f} nm.")
 
     def computeLineSegLength(self, segment_roi):
-        print(segment_roi)
-        print(self.current_viewer._pxScale)
         segLength = 0.0
         points = []
         linearity = None
@@ -1581,7 +1594,7 @@ class ImageLabeling(QWidget):
                         linearity = float(np.clip(ratio * 100.0, 0, 100.0))
 
         seglength_nm = segLength * self.current_viewer._pxScale if self.current_viewer._pxScale else None
-        return seglength_nm, r_value**2, linearity
+        return seglength_nm, segLength, r_value**2, linearity
 
     def plotLineSegResults(self):
         filename = os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()])
@@ -1651,8 +1664,8 @@ class ImageLabeling(QWidget):
             'avg_length': [avgLength],
             'length_std': [lengthSTD],
             'gnr_coverage': [gnrCoverage],
-            'length_list': lengthList,
-            'r_squared_values': r_squared_values
+            'length_list': [lengthList],
+            'r_squared_values': [r_squared_values]
         })
         savefile = self.data_dir + "\\_results.csv"
         if not os.path.exists(savefile):
@@ -1832,7 +1845,6 @@ class ImageLabeling(QWidget):
         self.updateBrowserText(f"Saved {saved_total} clips to {out_root}")
 
     def showResults(self):
-        print(self.labelList)
         if any("9AP" in str(label) for label in self.labelList):
             self.get_vector_angles_within_9AP()
         if any("GNR" in str(label) for label in self.labelList):

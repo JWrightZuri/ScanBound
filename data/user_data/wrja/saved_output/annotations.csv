@@ -1,0 +1,24 @@
+objectName,type,x1,y1,dx,dy,file,label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425CFF0>,LineSegmentROI,150.5103448275862,122.00459770114942,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425CFF0>,LineSegmentROI,287.3379310344828,82.09655172413792,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425CFF0>,LineSegmentROI,289.6183908045977,112.88275862068966,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425CFF0>,LineSegmentROI,313.5632183908046,201.8206896551724,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425E210>,LineSegmentROI,128.84597701149426,253.13103448275862,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425E210>,LineSegmentROI,321.5448275862069,267.95402298850576,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425E210>,LineSegmentROI,329.52643678160916,246.2896551724138,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425E210>,LineSegmentROI,385.3977011494253,152.79080459770114,0,0,area20017_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425E2B0>,LineSegmentROI,67.7345537757437,257.66590389016017,0,0,0003_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425E2B0>,LineSegmentROI,164.75972540045765,263.61556064073227,0,0,0003_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425DDB0>,LineSegmentROI,135.92677345537757,265.4462242562929,0,0,0003_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425DDB0>,LineSegmentROI,136.8421052631579,263.61556064073227,0,0,0003_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425DDB0>,LineSegmentROI,115.33180778032036,279.1762013729977,0,0,0003_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425DDB0>,LineSegmentROI,163.84439359267733,239.8169336384439,0,0,0003_Z.jpg,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,96.22331691297208,31.85550082101806,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,125.7799671592775,25.61576354679803,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,141.871921182266,21.67487684729064,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,153.36617405582922,43.34975369458128,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,171.42857142857142,62.068965517241374,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,172.08538587848932,62.725779967159276,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,203.61247947454842,64.36781609195403,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,206.23973727422003,65.02463054187191,0,0,0001_Z.png,Empty Label
+<ui.PyQtImageViewer.QtImageViewer.LineSegmentROI object at 0x000001AFA425F2F0>,LineSegmentROI,208.86699507389162,64.36781609195403,0,0,0001_Z.png,Empty Label
