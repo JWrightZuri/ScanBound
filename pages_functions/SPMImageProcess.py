@@ -19,7 +19,6 @@ from scipy.ndimage import zoom
 from scipy import ndimage
 import csv
 from skimage import filters
-import cv2
 
 class SPMImageProcess(QWidget):
     # dirSent = QtCore.pyqtSignal(str)  # Signal to emit the directory path
@@ -695,7 +694,7 @@ class SPMImageProcess(QWidget):
         kernel = identity * (1.0 - strength) + kernel * strength
         
         # Apply filter
-        sharpened = cv2.filter2D(spmImage, -1, kernel)
+        # sharpened = cv2.filter2D(spmImage, -1, kernel)
         return sharpened
 
     def update_gauss_sigma(self, value):

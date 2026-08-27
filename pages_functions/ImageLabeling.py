@@ -55,7 +55,7 @@ class ImageLabeling(QWidget):
         self.ui.label_2.setText("Select a directory to view files")
         self.browserText = []
         self.metadata_dict = {}
-        self.currentPxSize= None
+        # self.current_viewer._pxScale= None
         self.labelList = []
         self.selected_roi = None  # Track currently selected ROI
         self.symmetryVectorMode = False
@@ -251,8 +251,7 @@ class ImageLabeling(QWidget):
                 label = selected_roi.iloc[0]['label']
         # print(f"Clicked ROI: {selected_roi}, associated label: {label}")
         # print(selected_roi.iloc[0]['type'])
-        if selected_roi.iloc[0]['type'] == 'LineSegmentROI':
-            print("Loop for updatebrowsertext")
+        if selected_roi.iloc[0]['type'] == 'LineSegmentROI' and self.current_viewer._pxScale is not None:
             segLength, r_squared, linearity = self.computeLineSegLength(selected_roi)
             self.updateBrowserText(f"Selected segment stats: \n L={segLength:.2f} nm, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
 
@@ -406,14 +405,13 @@ class ImageLabeling(QWidget):
                             f"Scale: {pixel_size_x:.2f} nm/pixel \n "
                             f"({width_real:.1f} x {height_real:.1f} nm)"
                         )
-                        self.currentPxSize= pixel_size_x
                         self.current_viewer._pxScale = pixel_size_x
-        elif self.current_viewer._pxScale is not None:
-            self.ui.label_5.setText(
-                f"Scale: {self.current_viewer._pxScale:.2f} nm/pixel \n "
-                f"({self.current_viewer._imgShape[0] * self.current_viewer._pxScale:.1f} x {self.current_viewer._imgShape[1] * self.current_viewer._pxScale:.1f} nm)"
-            )
         else:
+            if self.current_viewer._pxScale is not None:
+                self.ui.label_5.setText(
+                    f"Scale: {self.current_viewer._pxScale:.2f} nm/pixel \n "
+                    f"({self.current_viewer._imgShape[0] * self.current_viewer._pxScale:.1f} x {self.current_viewer._imgShape[1] * self.current_viewer._pxScale:.1f} nm)"
+                )
             self.ui.label_5.setText("Scale: Please set manually.")
         
 
@@ -430,10 +428,8 @@ class ImageLabeling(QWidget):
                 width_real = width_px * pixel_size_x
                 height_real = height_px * pixel_size_y
             else:
-                self.updateBrowserText(f"No metadata available for the {filename}.")
                 return None, None, None
         else:
-            self.updateBrowserText(f"No metadata available for the {filename}.")
             return None, None, None
         return pixel_size_x, width_real, height_real
 
@@ -841,7 +837,7 @@ class ImageLabeling(QWidget):
                 text_lines += [f"{label}: {count}" for label, count in label_counts.items()]
         
 
-        if 'LineSegmentROI' in self.annotations_df['type'].values:
+        if 'LineSegmentROI' in self.annotations_df['type'].values and self.current_viewer._pxScale is not None:
             line_segments = self.annotations_df[
                 (self.annotations_df['file'] == filename) &
                 (self.annotations_df['type'] == 'LineSegmentROI')
@@ -1009,7 +1005,7 @@ class ImageLabeling(QWidget):
             image_path = self.image_paths[current_index]
             filename = os.path.basename(image_path)
             label_annos = self.annotations_df
-            label_annos['scale'] = self.currentPxSize
+            label_annos['scale'] = self.current_viewer._pxScale
             save_dir = QFileDialog.getExistingDirectory(self, "Select Directory to Save Label Examples")
             if save_dir:
                 # Save cropped images
@@ -1184,8 +1180,8 @@ class ImageLabeling(QWidget):
         scale = df['scale'].iloc[0] if 'scale' in df.columns else 1.0  # Default scale if not present
         areas_real = [area * (scale ** 2) for area in px_areas] # Convert pixel area to real units
         # # Convert area back to pixel units using the currentPxSize from the viewer
-        # if hasattr(self, 'currentPxSize') and self.currentPxSize and self.currentPxSize != 0:
-        #     areas = [area / (self.currentPxSize ** 2) for area in areas]
+        # if hasattr(self, 'currentPxSize') and self.current_viewer._pxScale and self.current_viewer._pxScale != 0:
+        #     areas = [area / (self.current_viewer._pxScale ** 2) for area in areas]
         # else:
         #     areas = [area for area in px_areas]  # fallback to pixel area if scale not available
         aspect_ratios = [dx[i] / dy[i] if dy[i] != 0 else 0 for i in range(len(dy))]
@@ -1544,6 +1540,8 @@ class ImageLabeling(QWidget):
         self.updateBrowserText(f"Average GNR length: {gnr_avg_length:.2f} nm.")
 
     def computeLineSegLength(self, segment_roi):
+        print(segment_roi)
+        print(self.current_viewer._pxScale)
         segLength = 0.0
         points = []
         linearity = None
@@ -1582,7 +1580,7 @@ class ImageLabeling(QWidget):
                         ratio = ideal_length / segLength
                         linearity = float(np.clip(ratio * 100.0, 0, 100.0))
 
-        seglength_nm = segLength * self.currentPxSize if hasattr(self, 'currentPxSize') and self.currentPxSize else None
+        seglength_nm = segLength * self.current_viewer._pxScale if self.current_viewer._pxScale else None
         return seglength_nm, r_value**2, linearity
 
     def plotLineSegResults(self):
@@ -1621,7 +1619,7 @@ class ImageLabeling(QWidget):
             if not ok:
                 return
             gnrArea = gnrWidth * totalSegLength 
-            imgArea = self.current_viewer._imgShape[0] * self.currentPxSize * self.current_viewer._imgShape[1] * self.currentPxSize if hasattr(self, 'currentPxSize') and self.currentPxSize else 0
+            imgArea = self.current_viewer._imgShape[0] * self.current_viewer._pxScale * self.current_viewer._imgShape[1] * self.current_viewer._pxScale if self.current_viewer._pxScale else 0
             gnrCoverage = gnrArea / imgArea if imgArea > 0 else 0
             self.updateBrowserText(f"GNR area: {gnrArea:.2f} nm², Coverage: {gnrCoverage:.2f}")
 
