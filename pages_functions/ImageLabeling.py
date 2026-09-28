@@ -5,7 +5,8 @@ import PyQt6.QtCore as QtCore
 from ui.pages.ImageLabeling_ui import Ui_Form
 from ui.popUps.labelTextInput_ui import Ui_Form as Ui_LabelTextInput
 from ui.popUps.automaticAnnotation_ui import Ui_Form as Ui_AutomaticAnnotations
-from PyQt6.QtWidgets import QFileDialog, QLabel, QGridLayout
+from ui.popUps.predictions_ui import Ui_Form as Ui_Predictions
+from PyQt6.QtWidgets import QFileDialog, QLabel, QGridLayout, QTableWidgetItem
 import os
 from ui.PyQtImageViewer.QtImageViewer import QtImageViewer
 import numpy as np
@@ -42,6 +43,16 @@ class ImageLabeling(QWidget):
         if autoAnnotations_layout is None:
             autoAnnotations_layout = QVBoxLayout(self.ui.widget_10)
         autoAnnotations_layout.addWidget(self.autoAnnotations_dialog)
+        self.ui.widget_9.hide()
+
+        # Create predictions popup
+        self.predictions_ui = Ui_Predictions()
+        self.predictions_dialog = QWidget(self)
+        self.predictions_ui.setupUi(self.predictions_dialog)
+        predictions_layout = self.ui.widget_10.layout()
+        if predictions_layout is None:
+            predictions_layout = QVBoxLayout(self.ui.widget_10)
+        predictions_layout.addWidget(self.predictions_dialog)
         self.ui.widget_9.hide()
 
         # Display all widgets in stackedWidget
@@ -108,12 +119,23 @@ class ImageLabeling(QWidget):
         self.ui.pushButton_20.clicked.connect(self.annotations_ui_show)
         self.autoAnnotations_ui.pushButton.clicked.connect(self.closeAutoAnnotations)
 
+        # predictions widget
+        self.ui.pushButton_22.clicked.connect(self.predictions_ui_show)
+        self.predictions_ui.pushButton_4.clicked.connect(self.choosePredictionModel)
+        self.predictions_ui.pushButton_2.clicked.connect(self.makePrediction)
+        self.predictions_ui.pushButton.clicked.connect(self.closePredictions)
+        self.yolo_model_path = None  # Store the selected prediction model path
+
+        # Ensure all popups are hidden initially
+        self.closeLabelInput()
+        self.closeAutoAnnotations()
+        self.closePredictions()
 
         # Enable keyboard focus and shortcuts
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
         # Auto load data (temporary)
-        # self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\GNR_files\20260716_AuMica_694a_44974_44980_44981\saved_output")
+        self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240419_PdGaA111_279a_5min_RT_RT_120C_10min\saved_output")
         self.autoVector = False
         self.colorList = [
         QColor("#D81B60"),       # Custom color (hex code)
@@ -184,7 +206,7 @@ class ImageLabeling(QWidget):
 
     def updateBrowserText(self, text):
         self.browserText.append(text)
-        self.ui.textBrowser.setText('\n'.join(self.browserText))
+        self.ui.textBrowser.setText('\n \n'.join(self.browserText))
         self.ui.textBrowser.verticalScrollBar().setValue(self.ui.textBrowser.verticalScrollBar().maximum())  # Scroll to the bottom
 
     def load_images(self):
@@ -483,9 +505,33 @@ class ImageLabeling(QWidget):
             self.ui.label_7.setText("Auto Annotations Menu")
             self.autoAnnotations_dialog.show()
 
+    def closeLabelInput(self):
+        self.ui.widget_9.hide()
+        self.label_input_dialog.hide()
+
     def closeAutoAnnotations(self):
         self.ui.widget_9.hide()
         self.autoAnnotations_dialog.hide()
+
+    def predictions_ui_show(self):
+        """
+        Show the predictions input menu.
+        """
+        if not self.ui.widget_9.isVisible():
+            self.ui.label_7.setText("Predictions Menu")
+            self.ui.widget_9.show()
+            self.predictions_dialog.show()
+        elif self.predictions_dialog.isVisible():
+            self.ui.widget_9.hide()
+            self.predictions_dialog.hide()
+        elif self.label_input_dialog.isVisible():
+            self.label_input_dialog.hide()
+            self.ui.label_7.setText("Predictions Menu")
+            self.predictions_dialog.show()
+
+    def closePredictions(self):
+        self.ui.widget_9.hide()
+        self.predictions_dialog.hide()
 
     def setLabels(self):
         """ Set the labels from the input dialog and update the label list.
@@ -606,19 +652,28 @@ class ImageLabeling(QWidget):
         self.current_viewer._labelList = self.labelList
         self.updateBrowserText(f"Labels set: {', '.join(self.labelList)}")
 
-    def load_annotations(self):
+    def load_annotations(self, prediction_results=None, classes=None):
         current_index = self.ui.stackedWidget.currentIndex()
         self.ui.radioButton.setChecked(False)
-        if 0 <= current_index < len(self.image_paths):
-            image = os.path.basename(self.image_paths[current_index])
-        # Load annotations from a file
-        if self.data_dir is None:
-            self.data_dir = ""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Load Annotations", self.data_dir, "CSV Files (*.csv)",)
-        if file_path:
-            # Load the annotations and display them on the current image
-            load_annos = pd.read_csv(file_path)
-            # Set labelList to any unique labels present in the loaded annotations
+
+        if prediction_results is not None:
+            load_annos = prediction_results
+        else:   
+            if 0 <= current_index < len(self.image_paths):
+                image = os.path.basename(self.image_paths[current_index])
+            # Load annotations from a file
+            if self.data_dir is None:
+                self.data_dir = ""
+            file_path, _ = QFileDialog.getOpenFileName(self, "Load Annotations", self.data_dir, "CSV Files (*.csv)",)
+            if file_path:
+                # Load the annotations and display them on the current image
+                load_annos = pd.read_csv(file_path)
+            else:
+                self.updateBrowserText("No annotation file selected.")
+                return
+            
+        # Set labelList to any unique labels present in the loaded annotations
+        if classes is None:
             if 'label' in load_annos.columns:
                 self.labelList = [str(l) for l in load_annos['label'].dropna().unique()]
                 if 'Empty Label' in self.labelList:
@@ -627,58 +682,61 @@ class ImageLabeling(QWidget):
                 if 'Symmetry Vector' in self.labelList:
                     self.labelList.remove('Symmetry Vector')
                     # print("Removed label: Symmetry Vector")
-                self.labelList = sorted(self.labelList, key=lambda x: (not x[0].isdigit(), x.lower()))
-                # self.label_input_ui.listWidget.clear()
-                # self.label_input_ui.listWidget.addItems(self.labelList)
-                self.label_input_ui.treeWidget.clear()
-                self.label_input_ui.treeWidget.addTopLevelItems([QTreeWidgetItem([label]) for label in self.labelList])
-                self.ui.listWidget_2.clear()
-                self.ui.listWidget_2.addItem("Empty Label")
-                label_idx = 1
-                for idx, label in enumerate(self.labelList, 1):
-                    # self.ui.listWidget_2.addItem(f"{idx}: {label}")
-                    # Create a colored circle icon for each label using colorList
-                    color = self.colorList[idx - 1 % len(self.colorList)]
-                    pixmap = QtGui.QPixmap(20, 20)
-                    pixmap.fill(QtCore.Qt.GlobalColor.transparent)
-                    painter = QtGui.QPainter(pixmap)
-                    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-                    painter.setBrush(QtGui.QBrush(color))
-                    painter.setPen(QtCore.Qt.PenStyle.NoPen)
-                    painter.drawEllipse(2, 2, 16, 16)
-                    painter.end()
-                    item = QtGui.QStandardItem(f"{label_idx}: {label}")
-                    # If using QListWidget, set icon directly
-                    list_item = QListWidgetItem(f"{label_idx}: {label}")
-                    list_item.setIcon(QtGui.QIcon(pixmap))
-                    self.ui.listWidget_2.addItem(list_item)
-                    label_idx += 1
-            hold_viewer = self.ui.stackedWidget.currentWidget()
-            # Iterate through each viewer and add their annotations if available
-            for idx in range(self.ui.stackedWidget.count()):
-                self.ui.stackedWidget.setCurrentIndex(idx)
-                current_index = self.ui.stackedWidget.currentIndex()
-                self.current_viewer = self.ui.stackedWidget.widget(idx)
-                self.current_viewer._labelList = self.labelList
-                filename = os.path.basename(self.image_paths[idx])
-                image_annotations = load_annos[load_annos['file'] == filename]
-                if not image_annotations.empty:
-                    self.current_viewer.clearROIs()
-                    self.current_viewer.loadROIs(image_annotations, filename, "added")
-                filename = os.path.basename(self.image_paths[current_index])
-                self.labelTextDisplay(filename)  # Update label text display
-            # for index, row in self.annotations_df.iterrows():
-            #     label = row['label'] if 'label' in row else None
-            #     self.current_viewer.clearROIs()
-            #     self.current_viewer._currentLabel = label
-            #     self.current_viewer.loadROIs(self.annotations_df, image, "loaded")
-                    # if label == "Symmetry Vector":
-                    #     self.setSymmetryVector(row)
-            self.updateBrowserText(f"Loaded annotations from {file_path}")
-            self.current_viewer = hold_viewer  # Return to the originally active viewer
-            self.ui.stackedWidget.setCurrentWidget(hold_viewer)
-            self.labelTextDisplay(os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()]))  # Update label text display
-            # self.ui.stackedWidget.setCurrentIndex()
+        else:
+            self.labelList = [str(label) for label in classes.values()
+                              if str(label) != 'Empty Label']
+
+        # Write labels to the label input dialog's treeWidget
+        self.labelList = sorted(self.labelList, key=lambda x: (not x[0].isdigit(), x.lower()))
+        self.label_input_ui.treeWidget.clear()
+        self.label_input_ui.treeWidget.addTopLevelItems([QTreeWidgetItem([label]) for label in self.labelList])
+        self.ui.listWidget_2.clear()
+        self.ui.listWidget_2.addItem("Empty Label")
+        label_idx = 1
+        for idx, label in enumerate(self.labelList, 1):
+            # self.ui.listWidget_2.addItem(f"{idx}: {label}")
+            # Create a colored circle icon for each label using colorList
+            color = self.colorList[idx - 1 % len(self.colorList)]
+            pixmap = QtGui.QPixmap(20, 20)
+            pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(pixmap)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QtGui.QBrush(color))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawEllipse(2, 2, 16, 16)
+            painter.end()
+            item = QtGui.QStandardItem(f"{label_idx}: {label}")
+            # If using QListWidget, set icon directly
+            list_item = QListWidgetItem(f"{label_idx}: {label}")
+            list_item.setIcon(QtGui.QIcon(pixmap))
+            self.ui.listWidget_2.addItem(list_item)
+            label_idx += 1
+        hold_viewer = self.ui.stackedWidget.currentWidget()
+        # Iterate through each viewer and add their annotations if available
+        for idx in range(self.ui.stackedWidget.count()):
+            self.ui.stackedWidget.setCurrentIndex(idx)
+            current_index = self.ui.stackedWidget.currentIndex()
+            self.current_viewer = self.ui.stackedWidget.widget(idx)
+            self.current_viewer._labelList = self.labelList
+            filename = os.path.basename(self.image_paths[idx])
+            image_annotations = load_annos[load_annos['file'] == filename]
+            if not image_annotations.empty:
+                self.current_viewer.clearROIs()
+                self.current_viewer.loadROIs(image_annotations, filename, "added")
+            filename = os.path.basename(self.image_paths[current_index])
+            self.labelTextDisplay(filename)  # Update label text display
+        # for index, row in self.annotations_df.iterrows():
+        #     label = row['label'] if 'label' in row else None
+        #     self.current_viewer.clearROIs()
+        #     self.current_viewer._currentLabel = label
+        #     self.current_viewer.loadROIs(self.annotations_df, image, "loaded")
+                # if label == "Symmetry Vector":
+                #     self.setSymmetryVector(row)
+        self.updateBrowserText(f"Loaded annotations from {filename}")
+        self.current_viewer = hold_viewer  # Return to the originally active viewer
+        self.ui.stackedWidget.setCurrentWidget(hold_viewer)
+        self.labelTextDisplay(os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()]))  # Update label text display
+        # self.ui.stackedWidget.setCurrentIndex()
 
     def save_annotations(self):
         # Save annotations to a file
@@ -1366,7 +1424,11 @@ class ImageLabeling(QWidget):
             ]
             
             # Get the dimensions of the scan for coverage calculation
-            pix_x_scale, scan_width, scan_height = self.get_scan_dim(filename)
+
+            pix_x_scale = self.current_viewer._pxScale 
+            scan_width = self.current_viewer._imgShape[1] * pix_x_scale if self.current_viewer._imgShape is not None else None
+            scan_height = self.current_viewer._imgShape[0] * pix_x_scale if self.current_viewer._imgShape is not None else None
+
             if scan_width is None or scan_height is None:
                 self.updateBrowserText(f"Could not determine scan dimensions for {filename}. Skipping coverage calculation.")
                 continue
@@ -1609,10 +1671,10 @@ class ImageLabeling(QWidget):
             totalSegLength = 0.0
             lengthSTD = 0.0
             for _, segment in line_segments.groupby('objectName', sort=False):
-                length, r_squared, linearity = self.computeLineSegLength(segment)
-                if length is not None:
-                    totalSegLength += length
-                    lengthList.append(length)
+                length_nm, segLength, r_squared, linearity = self.computeLineSegLength(segment)
+                if length_nm is not None:
+                    totalSegLength += length_nm
+                    lengthList.append(length_nm)
                 if r_squared is not None:
                     r_squared_values.append(r_squared)
             avgLength = totalSegLength / len(line_segments['objectName'].unique()) if len(line_segments['objectName'].unique()) > 0 else 0
@@ -1641,12 +1703,12 @@ class ImageLabeling(QWidget):
                 plt.hist(lengthList, bins=countBins, color='steelblue', edgecolor='black', alpha=0.85, density=True, stacked=True)
                 plt.xlabel('R [nm]')
                 plt.ylabel('Density [1/nm]')
-                plt.title(f'GNR Length Distribution - {filename} \n Avg Length: {avgLength:.2f} ± {lengthSTD:.2f} nm')
+                plt.title(f'Length Distribution - {filename} \n Avg Length: {avgLength:.2f} ± {lengthSTD:.2f} nm')
                 plt.grid(axis='y', alpha=0.3)
                 plt.tight_layout()
                 plt.show()
                 self.updateBrowserText(
-                    f"Plotted GNR length histogram. N={len(lengthList)}, Avg={avgLength:.2f} ± {lengthSTD:.2f} nm."
+                    f"Plotted length histogram. N={len(lengthList)}, Avg={avgLength:.2f} ± {lengthSTD:.2f} nm."
                 )
                 self.saveResults(filename, avgLength, lengthSTD, gnrCoverage, lengthList, r_squared_values)
             else:
@@ -1678,7 +1740,7 @@ class ImageLabeling(QWidget):
                 writer = csv.writer(file)
                 writer.writerow(df.iloc[0])
             self.updateBrowserText(f"GNR results saved to {savefile}")
-        self.updateBrowserText(f"Results saved to {filename}")
+        self.updateBrowserText(f"Results saved to {savefile}")
 
     def saveLabelClips(self):
         from datetime import datetime
@@ -1850,6 +1912,80 @@ class ImageLabeling(QWidget):
         if any("GNR" in str(label) for label in self.labelList):
             print("Plotting GNR length histogram...")
             self.plotLineSegResults()
+
+    def choosePredictionModel(self):
+        from ultralytics import YOLO
+        options = QFileDialog.Option.DontUseNativeDialog
+        model_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select YOLO Model Weights",
+            "",
+            "PyTorch Model Files (*.pt);;All Files (*)",
+            options=options
+        )
+        if model_path:
+            self.ui.label_2.setText(f"Select classes to predict, then run your ML predictions.")
+            self.updateBrowserText(f"Loaded YOLO model weights: {model_path}")
+            self.yolo_model_path = model_path
+            self.predictions_ui.label.setText(f"Model: {os.path.basename(model_path)}")
+            model = YOLO(model_path)
+            classes = model.names
+            table = self.predictions_ui.tableWidget
+            table.setRowCount(0)
+            class_names = classes.values() if isinstance(classes, dict) else classes
+            class_names = [str(label) for label in classes.values()
+                                            if str(label) != 'Empty Label']
+            for row, class_name in enumerate(class_names):
+                table.insertRow(row)
+                item = QTableWidgetItem(str(class_name))
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(QtCore.Qt.CheckState.Checked)
+                table.setItem(row, 0, item)
+            
+        else:
+            self.ui.label_2.setText("No model selected.")
+            self.updateBrowserText("No YOLO model weights selected.")
+            self.predictions_ui.label.setText("Model: None")
+
+    def makePrediction(self):
+        from core.yolo_predict import predict_bounding_boxes
+        try:
+            if not self.yolo_model_path:
+                print("No YOLO model weights selected.")
+                return
+            weights = self.yolo_model_path
+            image = self.ui.stackedWidget.currentWidget()._imgPath
+        except Exception as e:
+            print(f"Error occurred while setting up prediction: {e}")
+            return
+        self.ui.label_2.setText("Running prediction...")
+        self.updateBrowserText("Running prediction on " + image.split("/")[-1] + " using weights: " + weights.split("/")[-1])
+
+        selected_classes = []
+        for row in range(self.predictions_ui.tableWidget.rowCount()):
+            item = self.predictions_ui.tableWidget.item(row, 0)
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                selected_classes.append(row)  # Use row index as class ID
+                # class_name = item.text()
+                # class_id = next((key for key, value in self.class_mapping.items() if value == class_name), None)
+                # if class_id is not None:
+                #     selected_classes[class_id] = class_name
+        prediction_results, classes = predict_bounding_boxes(
+            model_path=weights,
+            image_path=image,
+            conf_threshold=0.3,
+            selected_classes = selected_classes,
+            save_annotated_image=False,
+            output_image_path="prediction_output.jpg"
+        )
+
+        # prediction_results.to_csv("prediction_results.csv", index=False)    
+        if self.predictions_ui.checkBox.isChecked():
+            self.clearAnnotations()
+            
+        self.load_annotations(prediction_results = prediction_results, classes = classes)
+        self.ui.label_2.setText("Prediction complete.")
+            
 
 def handleLeftClick(x, y):
     row = int(y)

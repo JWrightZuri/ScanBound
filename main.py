@@ -6,7 +6,7 @@ import dateutil.rrule
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QMenu
 from PyQt6.QtGui import QAction, QTransform, QIcon
 from PyQt6.QtCore import Qt, QTimer, QElapsedTimer
-
+from static import resource_rc
 from ui.main_window_ui import Ui_MainWindow
 from pages_functions.home import Home
 from pages_functions.ImageLabeling import ImageLabeling
@@ -31,7 +31,7 @@ class MyWindow(QMainWindow):
         self.SPMImageProcess_btn = self.ui.pushButton_17
         self.ImageLabeling_btn = self.ui.pushButton_2
         self.IP1_btn = self.ui.pushButton_3
-        self.computerVision_btn = self.ui.pushButton_6
+        self.computerVision_btn = self.ui.pushButton_18
 
         self.settings_btn = self.ui.user_label
 

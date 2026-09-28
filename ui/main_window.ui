@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1133</width>
-    <height>601</height>
+    <width>1364</width>
+    <height>1038</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -73,6 +73,9 @@ border: none;</string>
         </property>
         <item row="0" column="0">
          <widget class="QToolBox" name="toolBox">
+          <property name="enabled">
+           <bool>true</bool>
+          </property>
           <property name="styleSheet">
            <string notr="true">#toolBox{
 	color: #fff;
@@ -111,8 +114,8 @@ border: none;</string>
             <rect>
              <x>0</x>
              <y>0</y>
-             <width>142</width>
-             <height>488</height>
+             <width>154</width>
+             <height>892</height>
             </rect>
            </property>
            <attribute name="icon">
@@ -147,8 +150,8 @@ border: none;</string>
                <string>Home</string>
               </property>
               <property name="icon">
-               <iconset>
-                <normaloff>:/icons/home.svg</normaloff>:/icons/home.svg</iconset>
+               <iconset resource="../static/resource.qrc">
+                <normaloff>:/icons/icons/home.svg</normaloff>:/icons/icons/home.svg</iconset>
               </property>
               <property name="checkable">
                <bool>true</bool>
@@ -161,8 +164,8 @@ border: none;</string>
                <string>SPM Image Process</string>
               </property>
               <property name="icon">
-               <iconset>
-                <normaloff>:/icons/file-plus.svg</normaloff>:/icons/file-plus.svg</iconset>
+               <iconset resource="../static/resource.qrc">
+                <normaloff>:/icons/icons/map.svg</normaloff>:/icons/icons/map.svg</iconset>
               </property>
              </widget>
             </item>
@@ -175,11 +178,33 @@ border: none;</string>
                <string>Image Labeling</string>
               </property>
               <property name="icon">
-               <iconset>
-                <normaloff>:/icons/grid.svg</normaloff>:/icons/grid.svg</iconset>
+               <iconset resource="../static/resource.qrc">
+                <normaloff>:/icons/icons/maximize.svg</normaloff>:/icons/icons/maximize.svg</iconset>
               </property>
               <property name="checkable">
                <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButton_18">
+              <property name="text">
+               <string>Computer Vision</string>
+              </property>
+              <property name="icon">
+               <iconset resource="../static/resource.qrc">
+                <normaloff>:/icons/icons/eye.svg</normaloff>:/icons/icons/eye.svg</iconset>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButton_19">
+              <property name="text">
+               <string>Scan to .xyz</string>
+              </property>
+              <property name="icon">
+               <iconset resource="../static/resource.qrc">
+                <normaloff>:/icons/icons/codepen.svg</normaloff>:/icons/icons/codepen.svg</iconset>
               </property>
              </widget>
             </item>
@@ -204,7 +229,7 @@ border: none;</string>
              <x>0</x>
              <y>0</y>
              <width>142</width>
-             <height>488</height>
+             <height>909</height>
             </rect>
            </property>
            <attribute name="icon">
@@ -212,7 +237,7 @@ border: none;</string>
              <normaloff>:/newPrefix/icons/slack.svg</normaloff>:/newPrefix/icons/slack.svg</iconset>
            </attribute>
            <attribute name="label">
-            <string>Image Process</string>
+            <string>Plug-ins</string>
            </attribute>
            <layout class="QVBoxLayout" name="verticalLayout_2">
             <property name="spacing">
@@ -232,6 +257,9 @@ border: none;</string>
             </property>
             <item>
              <widget class="QPushButton" name="pushButton_3">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="focusPolicy">
                <enum>Qt::NoFocus</enum>
               </property>
@@ -245,6 +273,9 @@ border: none;</string>
             </item>
             <item>
              <widget class="QPushButton" name="pushButton_4">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="focusPolicy">
                <enum>Qt::NoFocus</enum>
               </property>
@@ -258,6 +289,9 @@ border: none;</string>
             </item>
             <item>
              <widget class="QPushButton" name="pushButton_5">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="focusPolicy">
                <enum>Qt::NoFocus</enum>
               </property>
@@ -290,7 +324,7 @@ border: none;</string>
              <x>0</x>
              <y>0</y>
              <width>142</width>
-             <height>488</height>
+             <height>909</height>
             </rect>
            </property>
            <attribute name="icon">
@@ -318,6 +352,9 @@ border: none;</string>
             </property>
             <item>
              <widget class="QPushButton" name="pushButton_6">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="focusPolicy">
                <enum>Qt::NoFocus</enum>
               </property>
@@ -335,6 +372,9 @@ border: none;</string>
             </item>
             <item>
              <widget class="QPushButton" name="pushButton_7">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="focusPolicy">
                <enum>Qt::NoFocus</enum>
               </property>
@@ -352,6 +392,9 @@ border: none;</string>
             </item>
             <item>
              <widget class="QPushButton" name="pushButton_11">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="text">
                <string>Add a plug-in!</string>
               </property>
@@ -359,6 +402,9 @@ border: none;</string>
             </item>
             <item>
              <widget class="QPushButton" name="pushButton_12">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
               <property name="text">
                <string>Add another!</string>
               </property>
@@ -813,6 +859,7 @@ p, li { white-space: pre-wrap; }
  </widget>
  <resources>
   <include location="../static/resource.qrc"/>
+  <include location="../../../.designer/static/resource.qrc"/>
  </resources>
  <connections>
   <connection>

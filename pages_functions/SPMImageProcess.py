@@ -138,7 +138,7 @@ class SPMImageProcess(QWidget):
 
     def updateBrowserText(self, text):
         self.browserText.append(text)
-        self.ui.textBrowser.setText('\n'.join(self.browserText))
+        self.ui.textBrowser.setText('\n \n'.join(self.browserText))
 
     def make_Viewer(self, imgPath=None, spmImage=None):
         viewer = QtImageViewer()
@@ -589,7 +589,7 @@ class SPMImageProcess(QWidget):
             if hasattr(widget, "setChecked"):
                 widget.setChecked(False)
         spm_obj = self.spm_objects[self.selected_index]
-        self.update_image(spm_obj=spm_obj, channel_name=self.selected_channel_name, initialize=False, modify=self.checkedMods)
+        self.update_image(channel_name=self.selected_channel_name, initialize=False, modify=self.checkedMods)
 
     def setColorMap(self):
         self.cmap = self.ui.comboBox.currentText()

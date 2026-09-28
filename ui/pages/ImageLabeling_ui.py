@@ -1,4 +1,4 @@
-# Form implementation generated from reading ui file '.\ImageLabeling.ui'
+# Form implementation generated from reading ui file './ui/pages/ImageLabeling.ui'
 #
 # Created by: PyQt6 UI code generator 6.11.0
 #
@@ -12,7 +12,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 class Ui_Form(object):
     def setupUi(self, Form):
         Form.setObjectName("Form")
-        Form.resize(1107, 884)
+        Form.resize(1107, 882)
         self.verticalLayout_8 = QtWidgets.QVBoxLayout(Form)
         self.verticalLayout_8.setObjectName("verticalLayout_8")
         self.splitter = QtWidgets.QSplitter(parent=Form)
@@ -47,7 +47,7 @@ class Ui_Form(object):
         sizePolicy.setVerticalStretch(0)
         sizePolicy.setHeightForWidth(self.label.sizePolicy().hasHeightForWidth())
         self.label.setSizePolicy(sizePolicy)
-        self.label.setMinimumSize(QtCore.QSize(0, 30))
+        self.label.setMinimumSize(QtCore.QSize(0, 40))
         self.label.setScaledContents(True)
         self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
@@ -244,6 +244,9 @@ class Ui_Form(object):
         self.pushButton_6.setObjectName("pushButton_6")
         self.horizontalLayout_2.addWidget(self.pushButton_6)
         self.verticalLayout.addWidget(self.widget_11)
+        self.pushButton_22 = QtWidgets.QPushButton(parent=self.widget_2)
+        self.pushButton_22.setObjectName("pushButton_22")
+        self.verticalLayout.addWidget(self.pushButton_22)
         self.pushButton_19 = QtWidgets.QPushButton(parent=self.widget_2)
         self.pushButton_19.setObjectName("pushButton_19")
         self.verticalLayout.addWidget(self.pushButton_19)
@@ -344,6 +347,7 @@ class Ui_Form(object):
         self.pushButton_21.setText(_translate("Form", "Characterize GNRs"))
         self.checkBox.setText(_translate("Form", "See Steps"))
         self.pushButton_6.setText(_translate("Form", "Auto Label"))
+        self.pushButton_22.setText(_translate("Form", "Set up ML Predictions"))
         self.pushButton_19.setText(_translate("Form", "Present results"))
         self.pushButton_12.setToolTip(_translate("Form", "Deletes annotations from the current image"))
         self.pushButton_12.setText(_translate("Form", "Clear All Annotations"))

@@ -722,6 +722,10 @@ class QtImageViewer(QGraphicsView):
                     roi = VectorROI(self)
                     roi.setLine(row['x1'], row['y1'], row['dx'], row['dy'])
                     self.addROIs(roi)
+                elif row['type'] == 'LineROI': # legacy support for old LineROI type
+                    roi = VectorROI(self)
+                    roi.setLine(row['x1'], row['y1'], row['dx'], row['dy'])
+                    self.addROIs(roi)
                 elif row['type'] == 'LineSegmentROI':
                     object_name = row['objectName'] if 'objectName' in row else None
                     if object_name not in line_segment_groups:
