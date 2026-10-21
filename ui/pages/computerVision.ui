@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1099</width>
-    <height>819</height>
+    <width>745</width>
+    <height>782</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -28,7 +28,7 @@
         <item>
          <widget class="QLabel" name="label">
           <property name="text">
-           <string>Setting up machine vision.</string>
+           <string>Machine learning training hub. Begin by preparing training data from your annotations, or load an already prepared folder.</string>
           </property>
           <property name="alignment">
            <set>Qt::AlignCenter</set>
@@ -63,28 +63,6 @@
          </property>
          <layout class="QVBoxLayout" name="verticalLayout_4">
           <item>
-           <widget class="QLabel" name="label_3">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>20</height>
-             </size>
-            </property>
-            <property name="maximumSize">
-             <size>
-              <width>16777215</width>
-              <height>20</height>
-             </size>
-            </property>
-            <property name="text">
-             <string>Actions</string>
-            </property>
-            <property name="alignment">
-             <set>Qt::AlignCenter</set>
-            </property>
-           </widget>
-          </item>
-          <item>
            <widget class="QPushButton" name="pushButton_2">
             <property name="text">
              <string>Prepare training data</string>
@@ -93,24 +71,11 @@
           </item>
           <item>
            <widget class="QPushButton" name="pushButton">
-            <property name="text">
-             <string>Load training data</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QLabel" name="label_6">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>40</height>
-             </size>
+            <property name="toolTip">
+             <string>Load a folder which already contains images, YOLO format annotations, and a .yaml file. Consult the ScanBound wiki for the correct format.</string>
             </property>
             <property name="text">
-             <string>Loaded inputs:</string>
-            </property>
-            <property name="wordWrap">
-             <bool>true</bool>
+             <string>Load prepared data</string>
             </property>
            </widget>
           </item>
@@ -126,6 +91,26 @@
              </size>
             </property>
            </spacer>
+          </item>
+          <item>
+           <widget class="QWidget" name="widget_11" native="true">
+            <layout class="QFormLayout" name="formLayout">
+             <item row="0" column="0">
+              <widget class="QLabel" name="label_11">
+               <property name="text">
+                <string>Project Name: </string>
+               </property>
+              </widget>
+             </item>
+             <item row="0" column="1">
+              <widget class="QLineEdit" name="lineEdit_2">
+               <property name="placeholderText">
+                <string>yolo_training</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
           </item>
           <item>
            <widget class="QLabel" name="label_18">
@@ -157,108 +142,7 @@
              <enum>QFrame::Plain</enum>
             </property>
             <layout class="QGridLayout" name="gridLayout_3">
-             <item row="0" column="0">
-              <widget class="QLabel" name="label_7">
-               <property name="text">
-                <string>YOLO model:</string>
-               </property>
-              </widget>
-             </item>
-             <item row="3" column="1">
-              <widget class="QComboBox" name="comboBox_5">
-               <property name="toolTip">
-                <string>Determines which PC device will be used during training. You must choose &quot;cpu&quot; if you will not run on a cuda-enabled gpu.</string>
-               </property>
-               <property name="whatsThis">
-                <string/>
-               </property>
-               <item>
-                <property name="text">
-                 <string>gpu</string>
-                </property>
-               </item>
-               <item>
-                <property name="text">
-                 <string>cpu</string>
-                </property>
-               </item>
-              </widget>
-             </item>
-             <item row="2" column="0">
-              <widget class="QLabel" name="label_12">
-               <property name="text">
-                <string>Augmentation Strategy</string>
-               </property>
-               <property name="wordWrap">
-                <bool>true</bool>
-               </property>
-              </widget>
-             </item>
-             <item row="3" column="0">
-              <widget class="QLabel" name="label_14">
-               <property name="text">
-                <string>Training device:</string>
-               </property>
-              </widget>
-             </item>
-             <item row="5" column="0">
-              <widget class="QLabel" name="label_16">
-               <property name="text">
-                <string>Batch size</string>
-               </property>
-              </widget>
-             </item>
-             <item row="4" column="0">
-              <widget class="QLabel" name="label_15">
-               <property name="text">
-                <string>Epochs</string>
-               </property>
-              </widget>
-             </item>
-             <item row="4" column="1">
-              <widget class="QSpinBox" name="spinBox_4">
-               <property name="value">
-                <number>50</number>
-               </property>
-              </widget>
-             </item>
-             <item row="2" column="1">
-              <widget class="QComboBox" name="comboBox_4">
-               <item>
-                <property name="text">
-                 <string>RandAugment</string>
-                </property>
-               </item>
-               <item>
-                <property name="text">
-                 <string>AutoAugment</string>
-                </property>
-               </item>
-               <item>
-                <property name="text">
-                 <string>AugMix</string>
-                </property>
-               </item>
-               <item>
-                <property name="text">
-                 <string>Custom</string>
-                </property>
-               </item>
-               <item>
-                <property name="text">
-                 <string>Disable Augmentations</string>
-                </property>
-               </item>
-              </widget>
-             </item>
-             <item row="5" column="1">
-              <widget class="QSpinBox" name="spinBox_5">
-               <property name="value">
-                <number>16</number>
-               </property>
-              </widget>
-             </item>
-             <item row="0" column="1">
+             <item row="1" column="1">
               <widget class="QComboBox" name="comboBox_2">
                <property name="toolTip">
                 <string>Determines what kind of YOLO training will be performed.</string>
@@ -300,6 +184,121 @@
                </item>
               </widget>
              </item>
+             <item row="0" column="0">
+              <widget class="QLabel" name="label_9">
+               <property name="text">
+                <string>Run name</string>
+               </property>
+              </widget>
+             </item>
+             <item row="0" column="1">
+              <widget class="QLineEdit" name="lineEdit">
+               <property name="placeholderText">
+                <string>trained_model</string>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="0">
+              <widget class="QLabel" name="label_7">
+               <property name="text">
+                <string>YOLO model:</string>
+               </property>
+              </widget>
+             </item>
+             <item row="4" column="1">
+              <widget class="QComboBox" name="comboBox_5">
+               <property name="toolTip">
+                <string>Determines which PC device will be used during training. You must choose &quot;cpu&quot; if you will not run on a cuda-enabled gpu.</string>
+               </property>
+               <property name="whatsThis">
+                <string/>
+               </property>
+               <item>
+                <property name="text">
+                 <string>gpu</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>cpu</string>
+                </property>
+               </item>
+              </widget>
+             </item>
+             <item row="3" column="0">
+              <widget class="QLabel" name="label_12">
+               <property name="text">
+                <string>Augmentation Strategy</string>
+               </property>
+               <property name="wordWrap">
+                <bool>true</bool>
+               </property>
+              </widget>
+             </item>
+             <item row="4" column="0">
+              <widget class="QLabel" name="label_14">
+               <property name="text">
+                <string>Training device:</string>
+               </property>
+              </widget>
+             </item>
+             <item row="6" column="0">
+              <widget class="QLabel" name="label_16">
+               <property name="text">
+                <string>Batch size</string>
+               </property>
+              </widget>
+             </item>
+             <item row="5" column="0">
+              <widget class="QLabel" name="label_15">
+               <property name="text">
+                <string>Epochs</string>
+               </property>
+              </widget>
+             </item>
+             <item row="5" column="1">
+              <widget class="QSpinBox" name="spinBox_4">
+               <property name="value">
+                <number>50</number>
+               </property>
+              </widget>
+             </item>
+             <item row="3" column="1">
+              <widget class="QComboBox" name="comboBox_4">
+               <item>
+                <property name="text">
+                 <string>RandAugment</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>AutoAugment</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>AugMix</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>Custom</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>Disable Augmentations</string>
+                </property>
+               </item>
+              </widget>
+             </item>
+             <item row="6" column="1">
+              <widget class="QSpinBox" name="spinBox_5">
+               <property name="value">
+                <number>16</number>
+               </property>
+              </widget>
+             </item>
             </layout>
            </widget>
           </item>
@@ -318,31 +317,14 @@
             <property name="minimumSize">
              <size>
               <width>0</width>
-              <height>200</height>
+              <height>150</height>
              </size>
             </property>
             <property name="maximumSize">
              <size>
               <width>16777215</width>
-              <height>250</height>
+              <height>300</height>
              </size>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="pushButton_4">
-            <property name="text">
-             <string>Run training</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="pushButton_6">
-            <property name="enabled">
-             <bool>false</bool>
-            </property>
-            <property name="text">
-             <string>Export training config</string>
             </property>
            </widget>
           </item>
@@ -358,6 +340,51 @@
              </size>
             </property>
            </spacer>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_3">
+            <property name="enabled">
+             <bool>true</bool>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>40</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Output destination:</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pushButton_4">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
+            <property name="toolTip">
+             <string/>
+            </property>
+            <property name="text">
+             <string>Run training</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pushButton_6">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
+            <property name="text">
+             <string>Export training config</string>
+            </property>
+           </widget>
           </item>
           <item>
            <widget class="QPushButton" name="pushButton_5">
@@ -428,9 +455,9 @@
         </widget>
         <widget class="QWidget" name="widget_5" native="true">
          <layout class="QGridLayout" name="gridLayout_5">
-          <item row="0" column="0">
+          <item row="1" column="0">
            <widget class="QWidget" name="widget_6" native="true">
-            <layout class="QGridLayout" name="gridLayout_4">
+            <layout class="QGridLayout" name="gridLayout">
              <item row="0" column="0">
               <widget class="QWidget" name="widget_10" native="true">
                <property name="maximumSize">
@@ -487,66 +514,49 @@
                </layout>
               </widget>
              </item>
-             <item row="1" column="0">
-              <widget class="QWidget" name="widget_8" native="true">
-               <property name="maximumSize">
-                <size>
-                 <width>600</width>
-                 <height>600</height>
-                </size>
+            </layout>
+           </widget>
+          </item>
+          <item row="0" column="0">
+           <widget class="QLabel" name="label_6">
+            <property name="maximumSize">
+             <size>
+              <width>16777215</width>
+              <height>20</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Results</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QWidget" name="widget_8" native="true">
+            <property name="maximumSize">
+             <size>
+              <width>16777215</width>
+              <height>500</height>
+             </size>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_5">
+             <item>
+              <widget class="QLabel" name="label_10">
+               <property name="text">
+                <string>results.csv</string>
                </property>
-               <layout class="QVBoxLayout" name="verticalLayout_11">
-                <item>
-                 <widget class="QComboBox" name="comboBox_6"/>
-                </item>
-                <item>
-                 <widget class="QLabel" name="label_20">
-                  <property name="maximumSize">
-                   <size>
-                    <width>600</width>
-                    <height>600</height>
-                   </size>
-                  </property>
-                  <property name="text">
-                   <string/>
-                  </property>
-                  <property name="scaledContents">
-                   <bool>true</bool>
-                  </property>
-                 </widget>
-                </item>
-               </layout>
+               <property name="alignment">
+                <set>Qt::AlignCenter</set>
+               </property>
               </widget>
              </item>
-             <item row="1" column="1">
-              <widget class="QWidget" name="widget_11" native="true">
-               <property name="maximumSize">
-                <size>
-                 <width>600</width>
-                 <height>600</height>
-                </size>
+             <item>
+              <widget class="QTableView" name="tableView">
+               <property name="editTriggers">
+                <set>QAbstractItemView::AnyKeyPressed|QAbstractItemView::EditKeyPressed</set>
                </property>
-               <layout class="QVBoxLayout" name="verticalLayout_9">
-                <item>
-                 <widget class="QComboBox" name="comboBox_8"/>
-                </item>
-                <item>
-                 <widget class="QLabel" name="label_21">
-                  <property name="maximumSize">
-                   <size>
-                    <width>600</width>
-                    <height>600</height>
-                   </size>
-                  </property>
-                  <property name="text">
-                   <string/>
-                  </property>
-                  <property name="scaledContents">
-                   <bool>true</bool>
-                  </property>
-                 </widget>
-                </item>
-               </layout>
               </widget>
              </item>
             </layout>

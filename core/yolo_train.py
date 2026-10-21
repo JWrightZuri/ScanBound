@@ -3,14 +3,16 @@ from ultralytics import YOLO
 def train_yolo_model(
     data_yaml_path: str = "./dataset.yaml",
     model_weights: str = "yolo26n.pt",  # e.g., 'yolo11n.pt', 'yolov8n.pt', 'yolo26n.pt'
+    save_dir: str = "./training_results",  # Directory to save training results
     classes: list = [0],  # Specify the classes to train on (e.g., [1, 2, 5])
     epochs: int = 100,
     img_size: int = 640,
     batch_size: int = 16,
-    device: str = "cuda",  # '0' for CUDA GPU, 'mps' for Apple Silicon, or 'cpu'
-    project_name: str = "testing",
-    run_name: str = "rectroi_detector",
+    device: str = "cpu",  # '0' for CUDA GPU, 'mps' for Apple Silicon, or 'cpu'
+    project: str = "testing",
+    name: str = "rectroi_detector",
     augmentations: str = "randaugment",  # Ultralytics auto-augmentation strategy
+    augmentations_custom: list = None  # Custom augmentation strategy (if any)
 ):
     """
     Trains a YOLO object detection model on custom data using the Ultralytics API.
@@ -18,26 +20,47 @@ def train_yolo_model(
     # 1. Load a pretrained model baseline (recommended for faster convergence)
     model = YOLO(model_weights)
 
+    if project == "":
+        project = None
+        
     # 2. Train the model
-    results = model.train(
-        data=data_yaml_path,
-        classes=classes,
-        epochs=epochs,
-        imgsz=img_size,
-        batch=batch_size,
-        device=device,
-        project=project_name,
-        name=run_name,
-        auto_augment=augmentations,
-        pretrained=True,
-        plots=True,          # Generates loss plots, PR curves, and confusion matrices
-        save=True,           # Automatically saves best.pt and last.pt checkpoints
-        workers=4,            # Dataloader worker subprocesses
-    )
-
+    if augmentations_custom:
+        # If a custom augmentation strategy is provided, use it
+        results = model.train(
+            data=data_yaml_path,
+            save_dir=save_dir,
+            classes=classes,
+            epochs=epochs,
+            imgsz=img_size,
+            batch=batch_size,
+            device=device,
+            project=project,
+            name=name,
+            augmentations=augmentations_custom,  # Use custom augmentations
+            pretrained=True,
+            plots=True,          # Generates loss plots, PR curves, and confusion matrices
+            save=True,           # Automatically saves best.pt and last.pt checkpoints
+            workers=4,           # Dataloader worker subprocesses
+        )
+    else:
+        results = model.train(
+            data=data_yaml_path,
+            save_dir=save_dir,
+            classes=classes,
+            epochs=epochs,
+            imgsz=img_size,
+            batch=batch_size,
+            device=device,
+            project=project,
+            name=name,
+            auto_augment=augmentations,
+            pretrained=True,
+            plots=True,          # Generates loss plots, PR curves, and confusion matrices
+            save=True,           # Automatically saves best.pt and last.pt checkpoints
+            workers=4,           # Dataloader worker subprocesses
+        )
     print("Training complete.")
     print(f"Results and weights saved to: {results.save_dir}") # Need to return this to calling function to direct user and predictions.
-        
     return results.save_dir  # Return the directory where results are saved for further use (e.g., for predictions or evaluation)
 
 if __name__ == "__main__":

@@ -1,0 +1,58 @@
+{
+  "format": "image_adapt_pipeline",
+  "version": 1,
+  "steps": [
+    {
+      "type": "gaussian",
+      "enabled": true,
+      "params": {
+        "sigma": 0.2
+      }
+    },
+    {
+      "type": "background",
+      "enabled": true,
+      "params": {
+        "sigma": 11.0
+      }
+    },
+    {
+      "type": "threshold",
+      "enabled": true,
+      "params": {
+        "method": "Otsu",
+        "features": "Bright",
+        "value": 0.5,
+        "block": 31,
+        "offset": 0.06
+      }
+    },
+    {
+      "type": "morph",
+      "enabled": false,
+      "params": {
+        "op": "Open",
+        "size": 3,
+        "iterations": 1
+      }
+    },
+    {
+      "type": "size_filter",
+      "enabled": true,
+      "params": {
+        "min_size": 30,
+        "max_size": 0
+      }
+    }
+  ],
+  "roi": {
+    "enabled": true,
+    "roi_type": "PolygonROI",
+    "rect_padding": 0.0,
+    "padding": 2.0,
+    "tolerance": 2.0,
+    "max_vertices": 8,
+    "convex_hull": false,
+    "line_tolerance": 1.5
+  }
+}

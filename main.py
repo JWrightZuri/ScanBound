@@ -66,6 +66,7 @@ class MyWindow(QMainWindow):
         self.SPMImageProcess_btn.clicked.connect(self.show_selected_window)
         self.IP1_btn.clicked.connect(self.show_selected_window)
         self.computerVision_btn.clicked.connect(self.show_selected_window)
+        
 
     # def show_settings_menu(self, pos):
     #     menu = QMenu(self)
@@ -208,7 +209,7 @@ if __name__ == '__main__':
 
 
     main_window = MyWindow()
-    # main_window.setWindowTitle("MOSAIC") # - Molecular Scan Analysis and Characterization")
+    main_window.setWindowTitle("ScanBound")
     # main_window.setWindowIcon(QIcon("static/Mosaic_logo.ico"))
     
     # Show the main window

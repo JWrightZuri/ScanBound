@@ -1,0 +1,5 @@
+path: C:\Users\wrja\Desktop\ScanBound\data\user_data\yolo_training
+train: images\train
+val: images\val
+names:
+  0: GNR (GNR)

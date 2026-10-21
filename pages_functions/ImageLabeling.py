@@ -1,14 +1,18 @@
 import pandas as pd
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QInputDialog, QTreeWidgetItem, QListWidgetItem, QApplication
+from PyQt6.QtWidgets import QWidget, QDialog, QVBoxLayout, QInputDialog, QTreeWidgetItem, QListWidgetItem, QApplication, \
+    QPushButton, QCheckBox, QToolButton, QMenu, QSizePolicy
+import math
 import PyQt6.QtGui as QtGui
 import PyQt6.QtCore as QtCore
 from ui.pages.ImageLabeling_ui import Ui_Form
-from ui.popUps.labelTextInput_ui import Ui_Form as Ui_LabelTextInput
 from ui.popUps.automaticAnnotation_ui import Ui_Form as Ui_AutomaticAnnotations
 from ui.popUps.predictions_ui import Ui_Form as Ui_Predictions
 from PyQt6.QtWidgets import QFileDialog, QLabel, QGridLayout, QTableWidgetItem
 import os
-from ui.PyQtImageViewer.QtImageViewer import QtImageViewer
+from collections import Counter
+from core.label_editor import LabelEditor, LabelManager
+from ui.PyQtImageViewer.QtImageViewer import (QtImageViewer, ANNOTATION_COLUMNS, FRAME_COLUMNS, EMPTY_LABEL,
+                                              SYMMETRY_LABEL, ORIENT_MODE, label_color)
 import numpy as np
 import csv
 from core.first_pass_segment import run_first_pass_segment
@@ -18,6 +22,69 @@ import matplotlib.pyplot as plt
 from PyQt6.QtGui import QColor
 import scipy.stats as stats
 
+
+def polyline_stats(xy, px_scale=None):
+    """
+    Length and straightness of a polyline given as (N, 2) points.
+    Returns (length_nm or None, length_px, r_squared, linearity_percent).
+    """
+    xy = np.asarray(xy, dtype=float).reshape(-1, 2)
+    xy = xy[np.all(np.isfinite(xy), axis=1)]
+    seg_length = 0.0
+    r_squared = None
+    linearity = None
+    if len(xy) >= 2:
+        x, y = xy[:, 0], xy[:, 1]
+        seg_d = np.hypot(np.diff(x), np.diff(y))
+        seg_length = float(seg_d.sum())
+
+        # Regress over the polyline resampled at ~1 px spacing: simplified lines have
+        # only a few vertices, so a fit through the vertices alone would be meaningless
+        # (r² = 1 for two points).
+        cum = np.concatenate([[0.0], np.cumsum(seg_d)])
+        if cum[-1] > 0:
+            ts = np.linspace(0.0, cum[-1], max(int(np.ceil(cum[-1])) + 1, 2))
+            xd, yd = np.interp(ts, cum, x), np.interp(ts, cum, y)
+        else:
+            xd, yd = x, y
+        try:
+            r_squared = float(stats.linregress(xd, yd).rvalue ** 2)
+        except ValueError:      # all x identical: perfectly vertical segment
+            r_squared = 1.0
+
+        ideal_length = float(np.hypot(x[-1] - x[0], y[-1] - y[0]))
+        if ideal_length == 0 or seg_length == 0:
+            linearity = 100.0
+        else:
+            linearity = float(np.clip(ideal_length / seg_length * 100.0, 0, 100.0))
+
+    length_nm = seg_length * px_scale if px_scale else None
+    return length_nm, seg_length, r_squared, linearity
+
+
+def thicken_polyline(points, half_width, end_buffer=0.0):
+    """Polygon outline (M, 2) of a polyline widened by half_width on each side and extended
+    by end_buffer at both ends."""
+    p = np.asarray(points, dtype=float).reshape(-1, 2).copy()
+    if end_buffer > 0:
+        for end, nxt in ((0, 1), (-1, -2)):
+            d = p[end] - p[nxt]
+            n = np.hypot(*d)
+            if n > 0:
+                p[end] = p[end] + d / n * end_buffer
+    tang = np.empty_like(p)
+    tang[0] = p[1] - p[0]
+    tang[-1] = p[-1] - p[-2]
+    tang[1:-1] = p[2:] - p[:-2]
+    length = np.hypot(tang[:, 0], tang[:, 1])
+    safe = np.where(length > 0, length, 1.0)
+    normals = np.stack([-tang[:, 1], tang[:, 0]], axis=1) / safe[:, None]
+    normals[length == 0] = 0.0
+    left = p + normals * half_width
+    right = p - normals * half_width
+    return np.vstack([left, right[::-1]])
+
+
 # pyuic6.exe .\ImageLabeling.ui -o .\ImageLabeling_ui.py
 class ImageLabeling(QWidget):
     def __init__(self, main_window=None):
@@ -26,14 +93,30 @@ class ImageLabeling(QWidget):
         self.ui.setupUi(self)
         self.main_window = main_window
 
-        # Create and Hide the label text input widget
-        self.label_input_ui = Ui_LabelTextInput()
-        self.label_input_dialog = QWidget(self)
-        self.label_input_ui.setupUi(self.label_input_dialog)
+        # ROI changes are coalesced: label counts / examples are refreshed once per burst
+        self._refresh_timer = QtCore.QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(30)
+        self._refresh_timer.timeout.connect(self._refresh_roi_panels)
+        self._syncing_label = False   # True while the label list is updated to mirror a selection
+
+        # Label list: one model (LabelManager) + its editor panel (core/label_editor.py).
+        # Every change is applied at once and announced by signals handled below.
+        self.label_manager = LabelManager(self)
+        self.label_editor = LabelEditor(self.label_manager,
+                                        color_for=lambda name: label_color(name, self.labelList),
+                                        count_provider=self._label_counts, parent=self)
+        self.label_input_dialog = self.label_editor           # shown in the side panel (widget_9)
         label_ui_layout = self.ui.widget_10.layout()
         if label_ui_layout is None:
             label_ui_layout = QVBoxLayout(self.ui.widget_10)
-        label_ui_layout.addWidget(self.label_input_dialog)
+        label_ui_layout.addWidget(self.label_editor)
+        self.label_manager.changed.connect(self._on_labels_changed)
+        self.label_manager.renamed.connect(self._on_label_renamed)
+        self.label_manager.removed.connect(self._on_label_removed)
+        self.label_editor.labelActivated.connect(self._select_label_row)
+        self.label_editor.saveExamplesRequested.connect(self.saveLabelExamples)
+        self.label_editor.closeRequested.connect(self.closeLabelInput)
 
         # Create automaticAnnotations popup
         self.autoAnnotations_ui = Ui_AutomaticAnnotations()
@@ -55,6 +138,11 @@ class ImageLabeling(QWidget):
         predictions_layout.addWidget(self.predictions_dialog)
         self.ui.widget_9.hide()
 
+        # Image adaptation: mask pipeline + ROI generation dialog (core/image_adapt_dialog.py)
+        self.ui.pushButton_20.clicked.connect(self.adaptImage_show)
+        self.adapted_image_params = None   # last pipeline used in the dialog (re-opened with it)
+        self.roi_settings = None           # RoiSettings chosen in the dialog (also used by auto_segment_to_rois)
+
         # Display all widgets in stackedWidget
         self.ui.stackedWidget.removeWidget(self.ui.page)
         self.ui.stackedWidget.removeWidget(self.ui.page_2)
@@ -67,8 +155,6 @@ class ImageLabeling(QWidget):
         self.browserText = []
         self.metadata_dict = {}
         # self.current_viewer._pxScale= None
-        self.labelList = []
-        self.selected_roi = None  # Track currently selected ROI
         self.symmetryVectorMode = False
         self.symmetryVector = []  # Track the symmetry vector(s)
         # Connect listWidget item selection to image display
@@ -84,40 +170,54 @@ class ImageLabeling(QWidget):
         self.ui.pushButton_8.clicked.connect(self.activate_vector_mode)
         self.ui.pushButton_9.clicked.connect(self.activate_point_mode)
         self.ui.pushButton_14.clicked.connect(self.activate_line_segment_mode)
+        self.ui.pushButton_13.clicked.connect(self.activate_polygon_mode)
+
         self.ui.pushButton_2.clicked.connect(self.setScale)
         self.ui.pushButton_5.clicked.connect(self.load_annotations)
         self.ui.pushButton_3.clicked.connect(self.save_annotations)
         self.ui.pushButton_12.clicked.connect(self.clearAnnotations)
-        self.ui.pushButton_6.clicked.connect(self.runAutoSegment)
+        # self.ui.pushButton_6.clicked.connect(self.runAutoSegment)
+        # self.ui.pushButton_6.clicked.connect(self.auto_segment_to_rois)
+        # self.ui.pushButton_6.clicked.connect(self.runGNRSegmentation)
         self.ui.pushButton_15.clicked.connect(self.saveLabelClips)
         self.ui.pushButton_16.clicked.connect(self.clearActivityLog)
         self.ui.pushButton_18.clicked.connect(self.collectSymmetryVector)
-        self.ui.pushButton_19.clicked.connect(self.showResults)
-        self.ui.radioButton.clicked.connect(self.toggleAutoVector)
-        self.ui.pushButton_21.setVisible(False)  # Hide the GNR button unless GNR tag is active for a label
-        self.ui.pushButton_21.clicked.connect(self.runGNRSegmentation)
-        self.annotations_df = pd.DataFrame(columns=['objectName', 'type','x1', 'y1', 'dx', 'dy', 'file', 'label'])
+        # self.ui.pushButton_19.clicked.connect(self.showResults)
+        self.roi_analysis_button = QPushButton("Analyze ROIs", parent=self.ui.widget_2)
+        self.roi_analysis_button.setToolTip("Coverage, size distribution and label composition per label, "
+                                            "for the current image or all loaded images.")
+        self.ui.verticalLayout.insertWidget(self.ui.verticalLayout.indexOf(self.ui.pushButton_18) + 1,
+                                            self.roi_analysis_button)
+        self.roi_analysis_button.clicked.connect(self.open_roi_analysis)
+        self._roi_analysis_dialog = None
+        self._build_orientation_tools()
+        # self.ui.radioButton.clicked.connect(self.toggleAutoVector)
+        # self.ui.pushButton_21.setVisible(False)  # Hide the GNR button unless GNR tag is active for a label
+        # self.ui.pushButton_21.clicked.connect(self.convert_all_lines_to_polygons)
 
         # Buttons for side_ui_popup
         self.ui.pushButton_4.clicked.connect(self.label_ui_show)
-        self.label_input_ui.lineEdit.returnPressed.connect(self.setLabels)
-        self.label_input_ui.pushButton_3.clicked.connect(self.clearLabelsInput)
-        self.label_input_ui.pushButton_4.clicked.connect(self.label_ui_close)
-        self.label_input_ui.pushButton.clicked.connect(self.saveLabels)
-        self.label_input_ui.pushButton_2.clicked.connect(self.loadLabels)
-        # self.label_input_ui.listWidget.keyPressEvent = self.create_label_list_keypress_handler(self.label_input_ui.listWidget)
-        self.label_input_ui.treeWidget.setEditTriggers(self.label_input_ui.treeWidget.EditTrigger.DoubleClicked | 
-                                                       self.label_input_ui.treeWidget.EditTrigger.SelectedClicked)
-        self.label_input_ui.pushButton_5.clicked.connect(self.saveLabelExamples)
+        # Quick label actions directly on the label picker (right click)
+        self.ui.listWidget_2.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.listWidget_2.customContextMenuRequested.connect(self._label_picker_menu)
+        self.ui.listWidget_2.setToolTip("Label for new ROIs (number keys 0-9). Picking a label relabels the "
+                                        "selected ROIs. Right click to add / rename / remove labels.")
         self.current_label = None  # Track currently selected label
         self.labels_ready = False
         # Connect label selection changes
         self.ui.listWidget_2.itemSelectionChanged.connect(self.on_label_selection_changed)
+        self.distinguish_rois = QCheckBox("Vary shades within a label", parent=self.ui.widget_7)
+        self.distinguish_rois.setToolTip("Draw neighbouring ROIs of the same label in lighter / darker shades of the "
+                                         "label colour so touching or overlapping ROIs can be told apart.")
+        self.distinguish_rois.setChecked(True)
+        self.distinguish_rois.toggled.connect(self.set_distinguish_rois)
+        self.ui.verticalLayout_6.insertWidget(self.ui.verticalLayout_6.indexOf(self.ui.listWidget_2) + 1,
+                                              self.distinguish_rois)
     
-
+        self.current_viewer = None  # Track the current viewer for ROI operations
         # automaticAnnotations widget
-        self.ui.pushButton_20.clicked.connect(self.annotations_ui_show)
-        self.autoAnnotations_ui.pushButton.clicked.connect(self.closeAutoAnnotations)
+        # self.ui.pushButton_20.clicked.connect(self.annotations_ui_show)
+        # self.autoAnnotations_ui.pushButton.clicked.connect(self.closeAutoAnnotations)
 
         # predictions widget
         self.ui.pushButton_22.clicked.connect(self.predictions_ui_show)
@@ -134,22 +234,16 @@ class ImageLabeling(QWidget):
         # Enable keyboard focus and shortcuts
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
+        # Label list from the last session (empty on first use)
+        saved = QtCore.QSettings("ScanBound", "ImageLabeling").value("labels", [])
+        if isinstance(saved, str):
+            saved = [saved]
+        self.label_manager.set_labels(saved or [])
+        self.label_editor.previews.toggled.connect(lambda on: on and self.getLabelExamples())
+
         # Auto load data (temporary)
-        self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240419_PdGaA111_279a_5min_RT_RT_120C_10min\saved_output")
+        self.choose_directory(dir_path=r"C:\Users\wrja\Desktop\STM_Data\GNR_files\20260716_AuMica_694a_44974_44980_44981\saved_output")
         self.autoVector = False
-        self.colorList = [
-        QColor("#D81B60"),       # Custom color (hex code)
-        QColor("#1E88E5"),       # Another custom color
-        QColor("#FFC107"),
-        QColor("#4CDBB0"), 
-        QColor("#D55E00"),
-        QColor("#CC79A7"),
-        QColor("#F0E442"),
-        QColor("#56B4E9"),
-        QColor("#009E73"),
-        QColor("#E69F00"),
-        QColor("#0072B2"), 
-        ]
 
     def choose_directory(self, dir_path):
         if not dir_path:
@@ -199,8 +293,7 @@ class ImageLabeling(QWidget):
             #         self.updateBrowserText(f"Loaded metadata from {metadata_file}")
             #     except Exception as e:
             #         self.updateBrowserText(f"Failed to load metadata: {e}")
-        if self.annotations_df is not None:
-            self.annotations_df = self.annotations_df[0:0]  # Clear existing annotations
+        self.current_viewer = None   # the old viewers (and their ROIs) were removed above
         self.load_images()
         self.get_scan_dim()  # Load the pixel scale for each image based on metadata
 
@@ -227,11 +320,174 @@ class ImageLabeling(QWidget):
             # Load an image file to be displayed (will popup a file dialog).
             viewer.open(filepath=path)
             viewer.leftMouseButtonReleased.connect(handleLeftClick)
-            viewer.roiList.connect(self.roiUpdate)
+            viewer.roisChanged.connect(self.onRoisChanged)
             viewer.roiSelected.connect(self.roiSelection)
             viewer._imgPath = path  # Store the image path in the viewer instance
+            viewer.setLabelList(self.labelList)
+            if hasattr(self, "distinguish_rois"):
+                viewer.setDistinguishROIs(self.distinguish_rois.isChecked())
             self.ui.stackedWidget.addWidget(viewer)
             self.ui.label_2.setText("Press the box button to draw bounding boxes on the image")
+
+    def _viewers(self):
+        """All image viewers, in the same order as self.image_paths."""
+        viewers = []
+        for i in range(self.ui.stackedWidget.count()):
+            widget = self.ui.stackedWidget.widget(i)
+            if isinstance(widget, QtImageViewer):
+                viewers.append(widget)
+        return viewers
+
+    def _current_viewer(self):
+        widget = self.ui.stackedWidget.currentWidget()
+        return widget if isinstance(widget, QtImageViewer) else None
+
+    @property
+    def annotations_df(self):
+        """
+        All annotations of all images (columns ANNOTATION_COLUMNS), built from the ROIs held
+        by the viewers, which are the single source of truth.  Each viewer caches its own
+        table until its ROIs change, so this is cheap to call.
+        """
+        frames = [f for f in (v.annotationsFrame() for v in self._viewers()) if len(f)]
+        if not frames:
+            return pd.DataFrame(columns=FRAME_COLUMNS)
+        return pd.concat(frames, ignore_index=True)
+
+    def set_distinguish_rois(self, enabled):
+        for viewer in self._viewers():
+            viewer.setDistinguishROIs(enabled)
+
+    def _set_label_list_on_viewers(self):
+        for viewer in self._viewers():
+            viewer.setLabelList(self.labelList)
+
+    def _populate_label_widget(self):
+        """Fill the label picker (listWidget_2) with "Empty Label" + self.labelList, with colour icons
+        that match the ROI colours."""
+        self.ui.listWidget_2.blockSignals(True)
+        self.ui.listWidget_2.clear()
+        self.ui.listWidget_2.addItem(EMPTY_LABEL)
+        for label_idx, label in enumerate(self.labelList, 1):
+            pixmap = QtGui.QPixmap(20, 20)
+            pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(pixmap)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QtGui.QBrush(QColor(label_color(label, self.labelList))))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawEllipse(2, 2, 16, 16)
+            painter.end()
+            list_item = QListWidgetItem(f"{label_idx}: {label}")
+            list_item.setIcon(QtGui.QIcon(pixmap))
+            self.ui.listWidget_2.addItem(list_item)
+        self.ui.listWidget_2.blockSignals(False)
+        self._set_label_list_on_viewers()
+
+    def _schedule_refresh(self):
+        self._refresh_timer.start()
+
+    def _refresh_roi_panels(self):
+        self.labelTextDisplay()
+        self.getLabelExamples()
+        self.label_editor.update_counts()
+
+    # ------------------------------------------------------------------ label list
+
+    @property
+    def labelList(self):
+        """The label list (a copy); change it through self.label_manager or by assigning a new list."""
+        return self.label_manager.labels()
+
+    @labelList.setter
+    def labelList(self, labels):
+        self.label_manager.set_labels(labels)
+
+    def _label_counts(self):
+        """Number of ROIs per label over all images."""
+        counts = Counter()
+        for viewer in self._viewers():
+            counts.update(r.label for r in viewer.rois())
+        return dict(counts)
+
+    def _on_labels_changed(self):
+        """Label list changed (added / removed / renamed / reordered): update picker, colours, settings."""
+        current = self.get_current_label()
+        self._populate_label_widget()
+        if current and (current == EMPTY_LABEL or current in self.label_manager):
+            self._select_label_row(current)
+        QtCore.QSettings("ScanBound", "ImageLabeling").setValue("labels", self.labelList)
+        if hasattr(self, "ui"):
+            self._schedule_refresh()
+
+    def _rois_with_label(self, label):
+        return [(v, [r for r in v.rois() if r.label == label]) for v in self._viewers()]
+
+    def _on_label_renamed(self, old, new):
+        n = 0
+        for viewer, rois in self._rois_with_label(old):
+            if rois:
+                viewer.setROILabel(rois, new)
+                n += len(rois)
+        if self.current_viewer is not None and self.current_viewer._currentLabel == old:
+            self.current_viewer._currentLabel = new
+        self.updateBrowserText(f"Label '{old}' renamed to '{new}'" + (f" ({n} ROIs relabelled)." if n else "."))
+
+    def _on_label_removed(self, name, how):
+        n = 0
+        for viewer, rois in self._rois_with_label(name):
+            if not rois:
+                continue
+            n += len(rois)
+            if how == "delete":
+                viewer.deleteROIs(rois)
+            else:
+                viewer.setROILabel(rois, EMPTY_LABEL)
+        if self.current_viewer is not None and self.current_viewer._currentLabel == name:
+            self.current_viewer._currentLabel = EMPTY_LABEL
+        what = "deleted" if how == "delete" else "set to Empty Label"
+        self.updateBrowserText(f"Label '{name}' removed" + (f"; {n} ROI(s) {what}." if n else "."))
+
+    def _label_picker_menu(self, pos):
+        """Right-click menu of the label picker: add / rename / remove without opening the panel."""
+        item = self.ui.listWidget_2.itemAt(pos)
+        name = None
+        if item is not None and self.ui.listWidget_2.row(item) > 0:
+            text = item.text()
+            name = text.split(": ", 1)[1] if ": " in text else text
+        menu = QMenu(self)
+        menu.addAction("Add label…", self._quick_add_label)
+        if name:
+            menu.addAction(f"Rename '{name}'…", lambda: self._quick_rename_label(name))
+            menu.addAction(f"Remove '{name}'…", lambda: (self.label_editor.select(name),
+                                                         self.label_editor._remove_selected()))
+        menu.addSeparator()
+        menu.addAction("Edit labels…", self.open_label_panel)
+        menu.exec(self.ui.listWidget_2.mapToGlobal(pos))
+
+    def _quick_add_label(self):
+        text, ok = QInputDialog.getText(self, "Add label", "New label name:")
+        if not ok:
+            return
+        error = self.label_manager.validate(text)
+        if error:
+            self.updateBrowserText(error)
+            return
+        self.label_manager.add(text.strip())
+        self._select_label_row(text.strip())
+
+    def _quick_rename_label(self, name):
+        text, ok = QInputDialog.getText(self, "Rename label", f"New name for '{name}':", text=name)
+        if not ok or text.strip() == name:
+            return
+        error = self.label_manager.validate(text, allow_existing=True)
+        if error:
+            self.updateBrowserText(error)
+            return
+        self.label_manager.rename(name, text.strip())
+
+    def open_label_panel(self):
+        if not self.label_editor.isVisible():
+            self.label_ui_show()
 
     def display_selected_image(self):
         selected_items = self.ui.listWidget.selectedItems()
@@ -240,7 +496,8 @@ class ImageLabeling(QWidget):
         selected_index = self.ui.listWidget.row(selected_items[0])
         self.ui.stackedWidget.setCurrentIndex(selected_index)
         self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer._labelList = self.labelList
+        self.current_viewer.setLabelList(self.labelList)
+        self.current_viewer._currentLabel = self.get_current_label() or EMPTY_LABEL
         self.labelTextDisplay(os.path.basename(self.image_paths[selected_index]))
         # if self.metadata_dict:
         self.autoSetScale()
@@ -248,53 +505,65 @@ class ImageLabeling(QWidget):
         #     self.setScale()
         #     self.ui.label_5.setText("Scale: No metadata available, set manually.")
         # Maintaining the active mode while switching images
-        if self.getActiveMode == 'Zoom':
-            self.activate_zoom_mode()
-        if self.getActiveMode == 'Bbox':
-            self.activate_bounding_box_mode()
-        if self.getActiveMode == 'Vector':
-            self.activate_vector_mode()
-        if self.getActiveMode == 'Point':
-            self.activate_point_mode()
-        if self.getActiveMode == 'LineSegment':
-            self.activate_line_segment_mode()
+        activate = {
+            'Selection': self.activate_selection_mode,
+            'Zoom': self.activate_zoom_mode,
+            'Bbox': self.activate_bounding_box_mode,
+            'Vector': self.activate_vector_mode,
+            'Point': self.activate_point_mode,
+            'LineSegment': self.activate_line_segment_mode,
+            'Polygon': self.activate_polygon_mode,
+            'Orientation': self.activate_orientation_mode,
+        }.get(self.getActiveMode)
+        if activate is not None:
+            activate()
 
-    def roiSelection(self, roi):
+    def roiSelection(self, rois):
         """
-        Handle the selection of a ROI (Region of Interest) in the viewer.
-        :param roi: The selected ROI item.
+        Called when the user changes the ROI selection in the viewer.
+        Mirrors the label of the selection in the label list (without relabelling anything),
+        shows line segment statistics and handles symmetry-vector picking.
+        :param rois: list of selected ROI items (may be empty).
         """
-        self.selected_roi = roi
-        # Show all stored information for the ROI that was clicked.
-        # When a ROI is selected, update the label selection to match its label in annotations_df
-        label = None
-        if self.annotations_df is not None and not self.annotations_df.empty:
-            selected_roi = self.annotations_df[self.annotations_df['objectName'] == roi[0]]
-            if not selected_roi.empty and 'label' in selected_roi.columns:
-                label = selected_roi.iloc[0]['label']
-        # print(f"Clicked ROI: {selected_roi}, associated label: {label}")
-        # print(selected_roi.iloc[0]['type'])
-        if selected_roi.iloc[0]['type'] == 'LineSegmentROI':
-            segLength_nm, segLength, r_squared, linearity = self.computeLineSegLength(selected_roi)
-            if  self.current_viewer._pxScale is not None:
-                self.updateBrowserText(f"Selected segment stats: \n L={segLength_nm:.2f} nm, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
+        if not rois:
+            return
+        viewer = rois[0]._viewer
+        if self.symmetryVectorMode and len(rois) == 1 and rois[0].roiType == "VectorROI":
+            self.setSymmetryVector(rois[0])
+            return
+
+        if len(rois) == 1 and rois[0].roiType == "LineSegmentROI":
+            length_nm, length_px, r_squared, linearity = polyline_stats(rois[0].pointsArray(), viewer._pxScale)
+            r2_text = f"{r_squared:.2f}" if r_squared is not None else "n/a"
+            if length_nm is not None:
+                self.updateBrowserText(f"Selected segment stats: \n L={length_nm:.2f} nm, \n r²={r2_text}, \n Linearity={linearity:.2f}")
             else:
-                self.updateBrowserText(f"Selected segment stats: \n L={segLength:.2f} pixels, \n r²={r_squared:.2f}, \n Linearity={linearity:.2f}")
+                self.updateBrowserText(f"Selected segment stats: \n L={length_px:.2f} pixels, \n r²={r2_text}, \n Linearity={linearity:.2f}")
+        elif len(rois) > 1:
+            self.ui.label_2.setText(f"{len(rois)} ROIs selected. Pick a label to relabel them all, Delete to remove them.")
 
+        labels = {roi.label for roi in rois}
+        if len(labels) == 1:
+            self._select_label_row(labels.pop())
 
-        # Find the label in listWidget_2 and select it, or select "Empty Label" if not found
-        label_found = False
-        for i in range(self.ui.listWidget_2.count()):
-            item_text = self.ui.listWidget_2.item(i).text()
-            if label and item_text.endswith(label):
-                self.ui.listWidget_2.setCurrentRow(i)
-                label_found = True
+    def _select_label_row(self, label):
+        """Select `label` in the label list without relabelling the selected ROIs."""
+        target = 0   # "Empty Label"
+        for i in range(1, self.ui.listWidget_2.count()):
+            text = self.ui.listWidget_2.item(i).text()
+            name = text.split(": ", 1)[1] if ": " in text else text
+            if name == label:
+                target = i
                 break
-        if not label_found:
-            self.ui.listWidget_2.setCurrentRow(0)  # Select "Empty Label"
-        if self.symmetryVectorMode:
-            self.setSymmetryVector(roi[0])
-   
+        self._syncing_label = True
+        try:
+            self.ui.listWidget_2.setCurrentRow(target)
+        finally:
+            self._syncing_label = False
+        self.current_label = self.get_current_label()
+        if self.current_viewer is not None:
+            self.current_viewer._currentLabel = self.current_label or EMPTY_LABEL
+
     def active_button_color(self, widget):
         #This will be used to change the background color of the button for the active mode
         # Reset all buttons in widget_5 to grey background except the active one
@@ -303,99 +572,188 @@ class ImageLabeling(QWidget):
                 btn.setStyleSheet("background-color: #D3D3D3;")
         widget.setStyleSheet("background-color: #ADD8E6;")
 
-    def activate_selection_mode(self):
-        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
+    def _activate_mode(self, mode, draw_roi, button, message, zoom=False, select=False):
+        viewer = self._current_viewer()
+        if viewer is None:
             return
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer.regionZoomButton = None  # set to None to disable
-        self.current_viewer.zoomOutButton = QtCore.Qt.MouseButton.RightButton
-        self.ui.label_2.setText("Selection mode activated. Click and drag to select an area.")
-        # self.updateBrowserText(f"Selection mode activated.")
-        self.getActiveMode = 'Selection'
-        self.current_viewer.drawROI = None
-        # self.ui.pushButton_11.setStyleSheet("background-color: #ADD8E6;")
-        self.active_button_color(self.ui.pushButton_11)
-        self.current_viewer.setROIsAreMovable()  # Allow moving ROIs in selection mode
+        self.current_viewer = viewer
+        left, right = QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton
+        viewer.regionZoomButton = left if zoom else None
+        viewer.selectionButton = left if select else None
+        viewer.zoomOutButton = right if (zoom or select) else None
+        viewer.drawROI = draw_roi
+        self.getActiveMode = mode
+        self.ui.label_2.setText(message)
+        self.active_button_color(button)
+
+    def activate_selection_mode(self):
+        self._activate_mode('Selection', None, self.ui.pushButton_11,
+                            "Selection mode: click or drag to select ROIs (Ctrl adds), drag to move, drag handles to edit. "
+                            "Delete removes, a label picks relabels the selection.", select=True)
 
     def activate_zoom_mode(self):
-        # Check if the current viewer has a regionZoomButton attribute set
-        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
-            return
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer.regionZoomButton = QtCore.Qt.MouseButton.LeftButton
-        self.current_viewer.zoomOutButton = QtCore.Qt.MouseButton.RightButton
-        self.current_viewer.selectionButton = None  # Disable selection
-        self.ui.label_2.setText("Zoom mode activated. Click and drag to zoom the image. Pan with middle mouse.")
-        # self.updateBrowserText(f"Zoom mode activated.")
-        self.getActiveMode = 'Zoom'
-        self.current_viewer.drawROI = None
-        self.active_button_color(self.ui.pushButton_10)
-        self.current_viewer.setROIsAreMovable() 
+        self._activate_mode('Zoom', None, self.ui.pushButton_10,
+                            "Zoom mode activated. Click and drag to zoom the image. Pan with middle mouse.", zoom=True)
 
     def activate_bounding_box_mode(self):
-        # Check if the current viewer has a regionZoomButton attribute set
-        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
-            return
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer.regionZoomButton = None  # set to None to disable
-        self.current_viewer.selectionButton = None
-        self.current_viewer.zoomOutButton = None
-        self.ui.label_2.setText("Bounding box mode activated. Draw a box on the image. Pan with middle mouse. Right click to delete.")
-        # self.updateBrowserText(f"Bbox mode activated.")
-        self.getActiveMode = 'Bbox'
-        # Variables to store box coordinates
-        self.current_viewer.box_start = None
-        self.current_viewer.box_end = None
-        
-        self.current_viewer.drawROI = "RectROI"  # Set to "Rect" for rectangle drawing
-        self.active_button_color(self.ui.pushButton_7)
-        # self.current_viewer.roiAdded.connect(roiOutput)
-        self.current_viewer.setROIsAreMovable() 
+        self._activate_mode('Bbox', "RectROI", self.ui.pushButton_7,
+                            "Bounding box mode activated. Draw a box on the image, drag corners to resize. "
+                            "Pan with middle mouse. Right click to delete.")
 
     def activate_vector_mode(self):
-        # Check if the current viewer has a regionZoomButton attribute set
-        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
-            return
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer.regionZoomButton = None
-        self.current_viewer.selectionButton = None
-        self.current_viewer.zoomOutButton = None
-        self.ui.label_2.setText("Vector mode activated. Draw a vector on the image.")
-        # self.updateBrowserText(f"Vector mode activated.")
-        self.getActiveMode = 'Vector'
-        self.current_viewer.drawROI = "VectorROI"  # Set to "Line" for vector drawing
-        self.current_viewer._currentLabel = 'Empty Label'  # Default label for new vectors
-        self.active_button_color(self.ui.pushButton_8)
-        self.current_viewer.setROIsAreMovable() 
+        self._activate_mode('Vector', "VectorROI", self.ui.pushButton_8,
+                            "Vector mode activated. Draw a vector on the image. Right click to delete.")
 
     def activate_point_mode(self):
-        # Check if the current viewer has a regionZoomButton attribute set
-        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
-            return
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer.regionZoomButton = None
-        self.current_viewer.selectionButton = None
-        self.current_viewer.zoomOutButton = None
-        self.ui.label_2.setText("Point mode activated. Click to place points on the image.")
-        # self.updateBrowserText(f"Point mode activated.")
-        self.getActiveMode = 'Point'
-        self.current_viewer.drawROI = "PointROI"  # Set to "Point" for point drawing
-        self.active_button_color(self.ui.pushButton_9)
-        self.current_viewer.setROIsAreMovable() 
+        self._activate_mode('Point', "PointROI", self.ui.pushButton_9,
+                            "Point mode activated. Click to place points on the image. Right click to delete.")
 
     def activate_line_segment_mode(self):
-        if not hasattr(self.ui.stackedWidget.currentWidget(), "regionZoomButton"):
-            return
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        self.current_viewer.regionZoomButton = None
-        self.current_viewer.selectionButton = None
-        self.current_viewer.zoomOutButton = None
-        self.ui.label_2.setText("Line segment mode activated. Draw a line segment on the image.")
-        self.getActiveMode = 'LineSegment'
-        self.current_viewer.drawROI = "LineSegmentROI"  # Triggers line segment drawing on viewer
-        self.active_button_color(self.ui.pushButton_14)
-        self.current_viewer.setROIsAreMovable() 
-        
+        self._activate_mode('LineSegment', "LineSegmentROI", self.ui.pushButton_14,
+                            "Line segment mode: click to add points, double click or Enter to finish, "
+                            "Backspace removes the last point, Esc cancels. Double click a line to insert a vertex.")
+
+    def activate_orientation_mode(self):
+        self._activate_mode('Orientation', ORIENT_MODE, self.orientation_mode_button,
+                            "Orientation mode: drag inside an ROI from tail to head to set its orientation, drag an "
+                            "arrow tip to turn it, right click clears. Selected ROIs: ] / [ rotate 5° (Shift: 1°), F flips.")
+
+    # ------------------------------------------------------------------ orientations
+
+    def _build_orientation_tools(self):
+        """Orientation mode button (tool column) and the 'Orientation tools' menu (right panel)."""
+        self.orientation_mode_button = QPushButton("↗", parent=self.ui.widget_5)
+        self.orientation_mode_button.setMaximumSize(QtCore.QSize(50, 16777215))
+        self.orientation_mode_button.setToolTip("Orientation mode (Alt+8): drag inside an ROI to set its orientation")
+        font = self.orientation_mode_button.font()
+        font.setPointSize(14)
+        self.orientation_mode_button.setFont(font)
+        self.ui.verticalLayout_2.addWidget(self.orientation_mode_button)
+        self.orientation_mode_button.clicked.connect(self.activate_orientation_mode)
+
+        button = QToolButton(parent=self.ui.widget_2)
+        button.setText("Orientation tools")
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        menu = QMenu(button)
+        auto = menu.addMenu("Auto-orient from the image")
+        auto.addAction("Selected ROIs", lambda: self.auto_orient("selected"))
+        auto.addAction("ROIs with the current label", lambda: self.auto_orient("label"))
+        auto.addAction("All ROIs of this image", lambda: self.auto_orient("all"))
+        auto.addAction("All ROIs of all images", lambda: self.auto_orient("everything"))
+        auto.addSeparator()
+        self.orient_polar = auto.addAction("Head / tail direction (polar)")
+        self.orient_polar.setCheckable(True)
+        self.orient_polar.setChecked(True)
+        self.orient_polar.setToolTip("Off: only the axis (0-180°)")
+        self.orient_dark = auto.addAction("Features are dark")
+        self.orient_dark.setCheckable(True)
+        self.orient_only_unset = auto.addAction("Only ROIs without an orientation")
+        self.orient_only_unset.setCheckable(True)
+        self.orient_only_unset.setChecked(True)
+        menu.addAction("Convert vectors inside ROIs to orientations", self.convert_vectors_to_orientations)
+        menu.addAction("Clear orientation of selected ROIs", self.clear_selected_orientations)
+        menu.addSeparator()
+        self.show_orient = menu.addAction("Show orientation arrows")
+        self.show_orient.setCheckable(True)
+        self.show_orient.setChecked(True)
+        self.show_orient.toggled.connect(lambda on: [v.setShowOrientations(on) for v in self._viewers()])
+        button.setMenu(menu)
+        self.ui.verticalLayout.insertWidget(self.ui.verticalLayout.indexOf(self.roi_analysis_button) + 1, button)
+        self.orientation_tools_button = button
+
+    def _image_array(self, viewer):
+        idx = self.ui.stackedWidget.indexOf(viewer)
+        return imread(self.image_paths[idx], as_gray=True).astype(float)
+
+    def auto_orient(self, scope="selected"):
+        """Estimate ROI orientations from the image (intensity-weighted principal axis)."""
+        from core.orientation import estimate_orientation
+        viewers = self._viewers() if scope == "everything" else [self._current_viewer()]
+        polar = self.orient_polar.isChecked()
+        total = skipped = 0
+        for viewer in viewers:
+            if viewer is None:
+                continue
+            if scope == "selected":
+                rois = viewer.selectedROIs()
+            elif scope == "label":
+                rois = [r for r in viewer.rois() if r.label == (self.get_current_label() or EMPTY_LABEL)]
+            else:
+                rois = viewer.rois()
+            rois = [r for r in rois if r.roiType != "VectorROI"]
+            if self.orient_only_unset.isChecked() and scope != "selected":
+                rois = [r for r in rois if r.angle is None]
+            if not rois:
+                continue
+            image = self._image_array(viewer)
+            for roi in rois:
+                angle = estimate_orientation(image, roi.outlinePoints(), closed=roi.closed, polar=polar,
+                                             bright=not self.orient_dark.isChecked(),
+                                             point_radius=4 * viewer._pointRadius)
+                if angle is None:
+                    skipped += 1
+                    continue
+                viewer.setROIAngle([roi], angle, emit=False)
+                total += 1
+            viewer.roisChanged.emit("modified", rois)
+        self.updateBrowserText(f"Auto-oriented {total} ROI(s)" + (f", {skipped} without a clear feature" if skipped else "")
+                               + (". Check the arrows; F flips a selected ROI." if polar else " (axis only)."))
+
+    def convert_vectors_to_orientations(self):
+        """
+        Old workflow: a VectorROI drawn inside a box.  Every vector (except the symmetry vector)
+        whose two end points lie inside an ROI gives that ROI its orientation, and is removed.
+        """
+        from core.orientation import vector_angle
+        converted = left = 0
+        for viewer in self._viewers():
+            vectors = [v for v in viewer.rois("VectorROI") if v.label != SYMMETRY_LABEL]
+            targets = [r for r in viewer.rois() if r.roiType != "VectorROI" and r.closed]
+            done = []
+            for vec in vectors:
+                line = vec.line()
+                p1, p2 = line.p1(), line.p2()
+                inside = [r for r in targets
+                          if r.path().contains(p1 - r.pos()) and r.path().contains(p2 - r.pos())]
+                if not inside:
+                    left += 1
+                    continue
+                box = min(inside, key=lambda r: r.area())
+                viewer.setROIAngle([box], vector_angle(p1.x(), p1.y(), p2.x(), p2.y()), emit=False)
+                done.append(vec)
+                converted += 1
+            if done:
+                viewer.deleteROIs(done)
+        self.updateBrowserText(f"Converted {converted} vector(s) into ROI orientations"
+                               + (f"; {left} vector(s) were not inside an ROI and were kept." if left else "."))
+        self._schedule_refresh()
+
+    def clear_selected_orientations(self):
+        viewer = self._current_viewer()
+        if viewer is not None and viewer.selectedROIs():
+            viewer.setROIAngle(viewer.selectedROIs(), None)
+
+    def reference_angle(self, viewer=None):
+        """Reference direction (degrees) for orientations: the symmetry vector of the image, else
+        the last symmetry vector that was set, else None (image x axis)."""
+        from core.orientation import vector_angle
+        if viewer is not None:
+            sym = [r for r in viewer.rois("VectorROI") if r.label == SYMMETRY_LABEL]
+            if sym:
+                line = sym[0].line()
+                return vector_angle(line.x1(), line.y1(), line.x2(), line.y2())
+        if self.symmetryVector and len(self.symmetryVector) == 2:
+            dx, dy = self.symmetryVector
+            if dx or dy:
+                return math.degrees(math.atan2(dy, dx)) % 360.0
+        return None
+
+    def activate_polygon_mode(self):
+        self._activate_mode('Polygon', "PolygonROI", self.ui.pushButton_13,
+                            "Polygon mode: click to add points, double click or Enter to finish (>=3 points). "
+                            "Right click a vertex to remove it, double click an edge to insert one.")
+
     def setScale(self):
         # scale_factor, ok = QInputDialog.getDouble(self, "Set pixel to nm scale for current image.")
         ok = False
@@ -533,210 +891,165 @@ class ImageLabeling(QWidget):
         self.ui.widget_9.hide()
         self.predictions_dialog.hide()
 
-    def setLabels(self):
-        """ Set the labels from the input dialog and update the label list.
+    def adaptImage_show(self):
         """
+        Open the image adaptation dialog for the current image.
+
+        Tune the mask pipeline (filters, threshold, morphology, size filter ...) and the
+        ROI settings with a live preview of the distinct objects, and choose in the "Labels"
+        tab which label each object gets (one label, threshold rules on shape measures,
+        classes of one measure or automatic groups).  When "Apply" is pressed every object
+        is added as a ROI with its assigned label (objects set to "Skip" are left out).
+        The settings are remembered, so the dialog re-opens with the last pipeline.
+        """
+        from core.image_adapt_dialog import ImageAdaptDialog
+
+        current_index = self.ui.stackedWidget.currentIndex()
+        if not 0 <= current_index < len(self.image_paths):
+            self.updateBrowserText("No image selected.")
+            return
         self.current_viewer = self.ui.stackedWidget.currentWidget()
-        if not self.current_viewer:
-            self.updateBrowserText("No images loaded.")
-            self.ui.label_2.setText("No images loaded yet for labeling. Please choose a directory first.")
+        filename = os.path.basename(self.image_paths[current_index])
+        image = imread(self.image_paths[current_index], as_gray=True)
+
+        current = self.get_current_label()
+        if not current or current == EMPTY_LABEL:
+            current = self.labelList[0] if self.labelList else "object"
+        dlg = ImageAdaptDialog(image, parent=self, params=self.adapted_image_params,
+                               labels=self.labelList,
+                               label_colors={l: label_color(l, self.labelList) for l in self.labelList},
+                               px_scale=getattr(self.current_viewer, "_pxScale", None),
+                               current_label=current)
+        if not dlg.exec():          # Cancel / window closed
             return
 
-        # self.label_input_ui.listWidget.addItem(self.label_input_ui.lineEdit.text()) 
-        label_item = QTreeWidgetItem([self.label_input_ui.lineEdit.text()])
-        label_item.setFlags(label_item.flags() | QtCore.Qt.ItemFlag.ItemIsEditable)  # Make the item editable
-        self.label_input_ui.treeWidget.addTopLevelItem(label_item)
-        self.label_input_ui.lineEdit.clear()
-        self.label_input_ui.lineEdit.clear()
-    
-    def saveLabels(self):
-        """
-        Save the labels to a CSV file.
-        """
-        # Temp fix for setting labelList from treeWidget
-        self.label_ui_close()
-        self.ui.widget_9.show()
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Labels", "", "CSV Files (*.csv)")
-        # file_path = os.path.join(os.getcwd(), "data", "labels.csv")
-        if file_path:
-            with open(file_path, 'w', newline='') as file:
-                writer = csv.writer(file)
-                for label in self.labelList:
-                    writer.writerow([label])
-            self.updateBrowserText(f"Labels saved to {file_path}")
-            self.label_input_ui.label_3.setText(f"Saved {len(self.labelList)} labels to {file_path}")
-    
-    def loadLabels(self):
-        """
-        Load labels from a CSV file and populate the label input dialog.
-        """
-        # if os.path.exists(os.path.join(os.getcwd(), "data", "labels.csv")):
-        #     file_path = os.path.join(os.getcwd(), "data", "labels.csv")
-        # else:
-        file_path, _ = QFileDialog.getOpenFileName(self, "Load Labels", "", "CSV Files (*.csv)")
-        if file_path:
-            with open(file_path, 'r') as file:
-                reader = csv.reader(file)
-                self.labelList = [row[0] for row in reader if row]
-                # self.label_input_ui.listWidget.clear()
-                # self.label_input_ui.listWidget.addItems(self.labelList)
-                self.label_input_ui.treeWidget.clear()
-                self.label_input_ui.treeWidget.addTopLevelItems([QTreeWidgetItem([label]) for label in self.labelList])
-            self.label_input_ui.label_3.setText(f"Loaded {len(self.labelList)} labels from {file_path}")
+        # Remember what was used (also feeds auto_segment_to_rois via self.roi_settings)
+        self.adapted_image_params = dlg.get_params()
+        self.roi_settings = dlg.get_roi_settings()
 
-    def clearLabelsInput(self):
-        # self.label_input_ui.listWidget.clear()
-        self.label_input_ui.treeWidget.clear()
-        # self.labelList = []
-        print("Labels cleared")
+        if dlg.get_mask() is None:
+            self.updateBrowserText(
+                "Image adaptation has no active Threshold step, so there is no binary mask to create ROIs from."
+            )
+            return
+        labeled = dlg.get_labeled_objects()
+        if not labeled:
+            self.updateBrowserText("No objects to add (none found, or all groups set to 'Skip').")
+            return
+        self._add_objects_as_rois([o for o, _ in labeled], filename, labels=[l for _, l in labeled])
 
-    def eventFilter(self, obj, event):
-        # Allow editing label text on double click
-        if obj == self.label_input_ui.treeWidget and event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
-            item = obj.itemAt(event.pos())
-            print(f"Double clicked on item: {item.text(0) if item else 'None'}")
-            if item:
-                obj.editItem(item, 0)
-            return True
-        return super().eventFilter(obj, event)
+    def _add_objects_as_rois(self, objects, filename, labels=None):
+        """
+        Add segmented objects (core.roi_extraction.SegObject list) to the current image as ROIs.
+        ``labels`` gives one label per object; without it the currently selected label is used
+        (first label / "object" as fallback).  Labels not yet in the label list are added to it.
+        Returns the number of objects added.
+        """
+        if not objects:
+            self.updateBrowserText("No objects found, no ROIs were added.")
+            return 0
+
+        if labels is None:
+            label = self.get_current_label()
+            if not label or label == EMPTY_LABEL:
+                label = self.labelList[0] if self.labelList else "object"
+            labels = [label] * len(objects)
+
+        new_labels = self.label_manager.merge([l for l in dict.fromkeys(labels) if l and l != EMPTY_LABEL])
+        if new_labels:
+            self.updateBrowserText(f"New label(s) added to the label list: {', '.join(new_labels)}")
+
+        viewer = self.current_viewer
+        def coords(o):
+            if o.roi_type == "RectROI":
+                return o.rect
+            if o.roi_type == "PointROI":
+                return tuple(float(v) for v in o.points[0])
+            return o.points
+
+        rois = [viewer.createROI(o.roi_type, coords(o), label) for o, label in zip(objects, labels)]
+        viewer.addROIs(rois)          # one batch, one change signal
+
+        kind = objects[0].roi_type
+        n_vertices = sum(o.n_vertices for o in objects)
+        counts = Counter(labels)
+        per_label = ", ".join(f"{l}: {n}" for l, n in counts.most_common())
+        self.updateBrowserText(
+            f"Added {len(objects)} {kind}s ({per_label}; {n_vertices} vertices in total)."
+        )
+        return len(objects)
 
     def label_ui_close(self):
+        """Close the label panel (labels are applied as soon as they are edited)."""
+        self.closeLabelInput()
+
+    def load_annotations(self, prediction_results=False, classes=None, replace=True):
         """
-        Close the label input dialog and update the main UI.
+        Load annotations from a CSV file (or from a prediction DataFrame) into the viewers.
+        :param replace: clear the existing ROIs of every image that receives annotations.
         """
-        # self.label_input_dialog.close()
-        # self.labelList.append(self.label_input_ui.lineEdit.text())
-        # self.current_viewer._labelList = self.labelList
-
-        self.ui.widget_9.hide()
-        # Get each row entry from treeWidget and append to labelList (including label and any tags in parenthesis)
-        self.labelList = []
-        for i in range(self.label_input_ui.treeWidget.topLevelItemCount()):
-            item = self.label_input_ui.treeWidget.topLevelItem(i)
-            row_texts = [item.text(col) for col in range(item.columnCount())]
-            if row_texts:
-                # If any part of the row contains 'chiral', append '(S)' and '(R)' variants
-                label_base = row_texts[0]
-                if any('chiral' in text.lower() for text in row_texts):  
-                    self.labelList.append(label_base + " (None)")
-                    self.labelList.append(label_base + " (S)")
-                    self.labelList.append(label_base + " (R)")
-                    continue  # Skip normal label_text append below
-                if any('gnr' in text.lower() for text in row_texts):
-                    self.labelList.append(label_base + " (GNR)")
-                    self.ui.pushButton_21.setVisible(True)  # Show the GNR button
-                    continue  # Skip normal label_text append below
-            label_text = label_base
-            self.labelList.append(label_text)
-
-        self.ui.listWidget_2.clear()
-        label_idx = 1
-        self.ui.listWidget_2.addItem("Empty Label")
-        for i, label in enumerate(self.labelList):
-            # Create a colored circle icon for each label using colorList
-            color = self.colorList[i % len(self.colorList)]
-            pixmap = QtGui.QPixmap(20, 20)
-            pixmap.fill(QtCore.Qt.GlobalColor.transparent)
-            painter = QtGui.QPainter(pixmap)
-            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QtGui.QBrush(color))
-            painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.drawEllipse(2, 2, 16, 16)
-            painter.end()
-            item = QtGui.QStandardItem(f"{label_idx}: {label}")
-            # If using QListWidget, set icon directly
-            list_item = QListWidgetItem(f"{label_idx}: {label}")
-            list_item.setIcon(QtGui.QIcon(pixmap))
-            self.ui.listWidget_2.addItem(list_item)
-            label_idx += 1
-        self.current_viewer._labelList = self.labelList
-        self.updateBrowserText(f"Labels set: {', '.join(self.labelList)}")
-
-    def load_annotations(self, prediction_results=None, classes=None):
-        current_index = self.ui.stackedWidget.currentIndex()
-        self.ui.radioButton.setChecked(False)
-
-        if prediction_results is not None:
-            load_annos = prediction_results
-        else:   
-            if 0 <= current_index < len(self.image_paths):
-                image = os.path.basename(self.image_paths[current_index])
-            # Load annotations from a file
+        if hasattr(self.ui, "radioButton"):
+            self.ui.radioButton.setChecked(False)
+        self.autoVector = False
+        source = "predictions"
+        if not isinstance(prediction_results, pd.DataFrame):
             if self.data_dir is None:
                 self.data_dir = ""
             file_path, _ = QFileDialog.getOpenFileName(self, "Load Annotations", self.data_dir, "CSV Files (*.csv)",)
-            if file_path:
-                # Load the annotations and display them on the current image
-                load_annos = pd.read_csv(file_path)
-            else:
+            if not file_path:
                 self.updateBrowserText("No annotation file selected.")
                 return
-            
-        # Set labelList to any unique labels present in the loaded annotations
-        if classes is None:
-            if 'label' in load_annos.columns:
-                self.labelList = [str(l) for l in load_annos['label'].dropna().unique()]
-                if 'Empty Label' in self.labelList:
-                    self.labelList.remove('Empty Label')
-                    # print("Removed label: Empty Label")
-                if 'Symmetry Vector' in self.labelList:
-                    self.labelList.remove('Symmetry Vector')
-                    # print("Removed label: Symmetry Vector")
+            try:
+                load_annos = pd.read_csv(file_path)
+            except Exception as e:
+                self.updateBrowserText(f"Failed to read {file_path}: {e}")
+                return
+            source = file_path
         else:
-            self.labelList = [str(label) for label in classes.values()
-                              if str(label) != 'Empty Label']
+            load_annos = prediction_results
 
-        # Write labels to the label input dialog's treeWidget
-        self.labelList = sorted(self.labelList, key=lambda x: (not x[0].isdigit(), x.lower()))
-        self.label_input_ui.treeWidget.clear()
-        self.label_input_ui.treeWidget.addTopLevelItems([QTreeWidgetItem([label]) for label in self.labelList])
-        self.ui.listWidget_2.clear()
-        self.ui.listWidget_2.addItem("Empty Label")
-        label_idx = 1
-        for idx, label in enumerate(self.labelList, 1):
-            # self.ui.listWidget_2.addItem(f"{idx}: {label}")
-            # Create a colored circle icon for each label using colorList
-            color = self.colorList[idx - 1 % len(self.colorList)]
-            pixmap = QtGui.QPixmap(20, 20)
-            pixmap.fill(QtCore.Qt.GlobalColor.transparent)
-            painter = QtGui.QPainter(pixmap)
-            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QtGui.QBrush(color))
-            painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.drawEllipse(2, 2, 16, 16)
-            painter.end()
-            item = QtGui.QStandardItem(f"{label_idx}: {label}")
-            # If using QListWidget, set icon directly
-            list_item = QListWidgetItem(f"{label_idx}: {label}")
-            list_item.setIcon(QtGui.QIcon(pixmap))
-            self.ui.listWidget_2.addItem(list_item)
-            label_idx += 1
-        hold_viewer = self.ui.stackedWidget.currentWidget()
-        # Iterate through each viewer and add their annotations if available
-        for idx in range(self.ui.stackedWidget.count()):
-            self.ui.stackedWidget.setCurrentIndex(idx)
-            current_index = self.ui.stackedWidget.currentIndex()
-            self.current_viewer = self.ui.stackedWidget.widget(idx)
-            self.current_viewer._labelList = self.labelList
+        missing = {'type', 'x1', 'y1', 'dx', 'dy', 'file'} - set(load_annos.columns)
+        if missing:
+            self.updateBrowserText(f"Annotation file is missing columns: {', '.join(sorted(missing))}")
+            return
+
+        # Add the labels of the loaded annotations to the label list (existing labels keep their
+        # place, colour and number key)
+        if classes is None:
+            found = [str(l) for l in load_annos['label'].dropna().unique()] if 'label' in load_annos.columns else []
+        else:
+            found = [str(label) for label in classes.values()]
+        found = sorted((l for l in found if l not in (EMPTY_LABEL, SYMMETRY_LABEL)),
+                       key=lambda x: (not x[0].isdigit(), x.lower()))
+        added = self.label_manager.merge(found)
+        if added:
+            self.updateBrowserText(f"Labels added from the annotations: {', '.join(added)}")
+
+        # Group once by file instead of filtering the table for every image
+        by_file = {name: group for name, group in load_annos.groupby('file', sort=False)}
+        n_loaded = 0
+        n_images = 0
+        for idx, viewer in enumerate(self._viewers()):
             filename = os.path.basename(self.image_paths[idx])
-            image_annotations = load_annos[load_annos['file'] == filename]
-            if not image_annotations.empty:
-                self.current_viewer.clearROIs()
-                self.current_viewer.loadROIs(image_annotations, filename, "added")
-            filename = os.path.basename(self.image_paths[current_index])
-            self.labelTextDisplay(filename)  # Update label text display
-        # for index, row in self.annotations_df.iterrows():
-        #     label = row['label'] if 'label' in row else None
-        #     self.current_viewer.clearROIs()
-        #     self.current_viewer._currentLabel = label
-        #     self.current_viewer.loadROIs(self.annotations_df, image, "loaded")
-                # if label == "Symmetry Vector":
-                #     self.setSymmetryVector(row)
-        self.updateBrowserText(f"Loaded annotations from {filename}")
-        self.current_viewer = hold_viewer  # Return to the originally active viewer
-        self.ui.stackedWidget.setCurrentWidget(hold_viewer)
-        self.labelTextDisplay(os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()]))  # Update label text display
-        # self.ui.stackedWidget.setCurrentIndex()
+            image_annotations = by_file.get(filename)
+            if image_annotations is None or image_annotations.empty:
+                continue
+            if replace:
+                viewer.clearROIs()
+            n_loaded += len(viewer.loadROIs(image_annotations, None, "loaded"))
+            n_images += 1
+
+        # Restore the symmetry vector if one was saved
+        for viewer in self._viewers():
+            sym = [r for r in viewer.rois("VectorROI") if r.label == SYMMETRY_LABEL]
+            if sym:
+                line = sym[0].line()
+                self.symmetryVector = [line.dx(), -line.dy()]
+                self.updateBrowserText(f"Symmetry vector restored: dx={line.dx():.2f}, dy={-line.dy():.2f}")
+                break
+
+        self.updateBrowserText(f"Loaded {n_loaded} ROIs on {n_images} image(s) from {os.path.basename(str(source))}")
+        self._refresh_roi_panels()
 
     def save_annotations(self):
         # Save annotations to a file
@@ -752,180 +1065,79 @@ class ImageLabeling(QWidget):
                 self.updateBrowserText(f"Saved annotations to {file_path}")
             except Exception as e:
                 self.updateBrowserText(f"Save Failed: {e} \n Make sure file is not opened.")
-    
+
     def clearAnnotations(self):
         """
         Clear all annotations from the current image.
         """
-        self.current_viewer = self.ui.stackedWidget.currentWidget()
-        current_index = self.ui.stackedWidget.currentIndex()
-        self.current_viewer.clearROIs()
-        filename = os.path.basename(self.image_paths[current_index])
-        self.annotations_df = self.annotations_df[self.annotations_df['file'] != filename]
-        self.updateBrowserText("Cleared all annotations from the current image.")
-        self.labelTextDisplay(os.path.basename(self.image_paths[current_index]))
-
-    def roiUpdate(self, roiList: list) -> None:
-        """
-        Updates the region of interest (ROI) information based on the current viewer's state.
-        Parameters:
-            roiList (list): A list containing ROI data for different ROI types.
-        Behavior:
-            - Checks the current ROI type and change status from the viewer.
-            - If no ROI of the current type exists, the function returns immediately.
-            - If an ROI of type "Rect" is added, updates the browser text and the internal bbox dictionary.
-            - If an ROI of type "Rect" is deleted, updates the browser text and the internal bbox dictionary.
-        """
-        # 'type','x1', 'y1', 'dx', 'dy', 'file'
-        # Get the filename of the active viewer
-        current_index = self.ui.stackedWidget.currentIndex()
-        if 0 <= current_index < len(self.image_paths):
-            filename = os.path.basename(self.image_paths[current_index])
-            # print(f"Active viewer filename: {filename}")
-        else:
-            filename = None
-
-
-        label = self.current_viewer._currentLabel if self.current_viewer._currentLabel else self.get_current_label()
-
-        roiData = []
-        roi = roiList[0] if roiList else None  # Get the first ROI from the list
-        roiType = roi.__class__.__name__
-        roiChanged = self.current_viewer.roiChanged
-        self.selected_roi = roi
-        if self.symmetryVectorMode == True:
-            self.symmetryVectorMode = False  # Turn off symmetry vector mode after setting
-            self.setSymmetryVector(roi)
+        viewer = self._current_viewer()
+        if viewer is None:
             return
-        if roiChanged == "deleted":
-            if roi is not None:
-                # Remove rows with the same objectName (roi instance) from annotations_df
-                self.annotations_df = self.annotations_df[self.annotations_df['objectName'] != roi]
-                # self.updateBrowserText(f"{roiType[:-3]} deleted")
-                self.labelTextDisplay(filename)  # Update label text display 
-                self.selected_roi = None  # Clear selected ROI
-                return
-        else:
-            if roiType == "RectROI":
-                x1 = roi.rect().x()
-                y1 = roi.rect().y()
-                dx = roi.rect().width()
-                dy = roi.rect().height()
-                # Append ROI(s) and filename to self.annotations_df
-                # self.annotations_df = pd.DataFrame(bboxData, columns=['type', 'x1', 'y1', 'dx', 'dy', 'file'])
-                roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
+        self.current_viewer = viewer
+        viewer.clearROIs(emit=True)
+        self.updateBrowserText("Cleared all annotations from the current image.")
+        self._refresh_roi_panels()
 
-            if roiType == "VectorROI":
-                x1 = roi.line().x1()
-                y1 = roi.line().y1()
-                dx = roi.line().x2()
-                dy = roi.line().y2()
-                # self.annotations_df = pd.DataFrame(bboxData, columns=['type', 'x1', 'y1', 'x2', 'y2', 'file'])
-                roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
+    def onRoisChanged(self, action, rois):
+        """
+        Called once per ROI operation of a viewer (action: drawn, added, removed, modified,
+        relabeled).  The annotation table is derived from the viewers, so only the side panels
+        need refreshing (coalesced), plus the interactive extras for freshly drawn ROIs.
+        """
+        if action == "drawn" and rois:
+            roi = rois[0]
+            if self.symmetryVectorMode and roi.roiType == "VectorROI":
+                self.setSymmetryVector(roi)
+            elif self.autoVector and roi.roiType == "RectROI":
+                self._auto_vector_for(roi)
+        self._schedule_refresh()
 
-            if roiType == "LineSegmentROI":
-                linePointList = []
-                for point in roi._points:
-                    x1 = point.x()
-                    y1 = point.y()
-                    dx = 0
-                    dy = 0
-                    # linePointList.append((x1, y1, dx, dy))
-                    roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
-            if roiType == "PointROI":
-                x1 = roi.rect().x()
-                y1 = roi.rect().y()
-                dx = 0  # Point has no width
-                dy = 0  # Point has no height
-                # self.annotations_df = pd.DataFrame(pointData, columns=['type', 'x1', 'y1', 'dx', 'dy', 'file'])
-                roiData.append([roi, roiType, x1, y1, dx, dy, filename, label])
+    def _auto_vector_for(self, roi):
+        """Detect the chirality of a freshly drawn 9AP box and add its orientation vector."""
+        label = roi.label
+        if label not in ('9AP (None)', '9AP (S)', '9AP (R)'):
+            return
+        viewer = roi._viewer
+        current_index = self.ui.stackedWidget.indexOf(viewer)
+        if not 0 <= current_index < len(self.image_paths):
+            return
+        rect = roi.rect()
+        x1, y1 = int(rect.left()), int(rect.top())
+        x2, y2 = int(rect.right()), int(rect.bottom())
+        bbox = (y1, x1, y2, x2)
+        filename = os.path.basename(self.image_paths[current_index])
+        image = imread(self.image_paths[current_index], as_gray=True)
+        img = (image - image.min()) / (image.max() - image.min())
+        cropped_img = img[y1:y2, x1:x2]
+        chirality, vector = self.detectChirality(cropped_img, pad=0, filename=filename, label=label, bbox=bbox, plot_results=False)
+        if vector:
+            # the detected direction becomes the box's own orientation (no separate VectorROI)
+            from core.orientation import vector_angle
+            _, _, vx1, vy1, vx2, vy2, _, _ = vector[0]
+            viewer.setROIAngle([roi], vector_angle(vx1, vy1, vx2, vy2))
 
-            
-            # Figuring out a way to have chirality detection run whenever drawing a new 9AP
-            # box, and auto vector drawing when S or R is determined by user. TBA
-            # if label == "9AP" or label == "9AP (S)" or label == "9AP (R)":
-            #     image = imread(filename, as_gray=True)
-            #     pad = 5
-            #     cropped_img = image[y1-pad:dy+pad, x1-pad:dx+pad]
-            #     chirality, vectorData = self.detectChirality(cropped_img, pad)
-            #     print("9AP detected, running second pass segmentation.")                        
-            #     if label == "9AP":
-            #         label = f"{label} ({chirality})"
-            #     roi_df = pd.concat([roi_df, pd.DataFrame(vectorData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
-            #     self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
-
-            new_df = pd.DataFrame(roiData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
-            self.annotations_df = pd.concat([self.annotations_df, new_df], ignore_index=True)
-            self.labelTextDisplay(filename)  # Update label text display
-            
-            if self.labels_ready is False:
-                self.getLabelExamples()
-
-            if self.autoVector == True:
-                roi_df = pd.DataFrame(columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
-                if label == '9AP (None)' or label == '9AP (S)' or label == '9AP (R)':
-                    self.autoVector = False  # Prevent recursive calls
-                    # Run second pass segmentation
-                    y2 = y1 + dy
-                    x2 = x1 + dx
-                    y1 = int(y1)
-                    x1 = int(x1)
-                    y2 = int(y2)
-                    x2 = int(x2)
-                    bbox = (y1, x1, y2, x2)
-                    
-                    # print(bbox)
-                    image = imread(self.image_paths[current_index], as_gray=True)
-                    img = (image - image.min()) / (image.max() - image.min())
-                    cropped_img = img[y1:y2, x1:x2]
-                    chirality, vector = self.detectChirality(cropped_img, pad=0, filename=filename, label=label, bbox=bbox, plot_results=False)
-                    # if label == "9AP (R)" and vector is not None: # Temporary fix for R molecules with bright lobes
-                    #     try:
-                    #         invertVector = vector.copy()
-                    #         vector[0][2], vector[0][3], vector[0][4], vector[0][5] = invertVector[0][4], invertVector[0][5], invertVector[0][2], invertVector[0][3]
-                    #     except Exception as e:
-                    #         print(e)
-                    #         print("Vector inversion failed, forgetting.")
-                    roi_df = pd.concat([roi_df, pd.DataFrame(vector, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
-                    self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
-                    self.autoVector = True  # Re-enable for future use
-
-    def labelTextDisplay(self, filename):
-        # Display label counts in textBrowser_2
-        # Count each annotation objectName only once per file.
-        # roi_counts = self.annotations_df[
-        #     self.annotations_df['file'] == filename
-        # ].drop_duplicates(subset='objectName')['objectName'].value_counts()
+    def labelTextDisplay(self, filename=None):
+        """Label counts and average line segment length of the current image (from its ROIs)."""
+        viewer = self._current_viewer()
+        if viewer is None:
+            self.ui.textBrowser_2.setText("No ROIs or labels assigned yet.")
+            return
         text_lines = []
-        # if label and label != "Empty Label":
-        #     self.getLabelExamples()
-        # If labels exist, count by label as well
-        if 'label' in self.annotations_df.columns:
-            label_counts = self.annotations_df[
-                (self.annotations_df['file'] == filename) &
-                (self.annotations_df['label'] != 'Empty Label')
-            ].drop_duplicates(subset='objectName')['label'].value_counts()
-            if not label_counts.empty:
-                text_lines.append("Label counts:")
-                text_lines += [f"{label}: {count}" for label, count in label_counts.items()]
-        
+        rois = viewer.rois()
+        label_counts = Counter(r.label for r in rois if r.label and r.label != EMPTY_LABEL)
+        if label_counts:
+            text_lines.append("Label counts:")
+            text_lines += [f"{label}: {count}" for label, count in label_counts.most_common()]
+        if len(rois) and len(label_counts) == 0:
+            text_lines.append(f"{len(rois)} unlabeled ROIs")
 
-        if 'LineSegmentROI' in self.annotations_df['type'].values and self.current_viewer._pxScale is not None:
-            line_segments = self.annotations_df[
-                (self.annotations_df['file'] == filename) &
-                (self.annotations_df['type'] == 'LineSegmentROI')
-            ]
-            totalSegLength = 0.0
-            lengthSTD = 0.0
-            for _, segment in line_segments.groupby('objectName', sort=False):
-                totalSegLength += self.computeLineSegLength(segment)[0]
-            avgLength = totalSegLength / len(line_segments['objectName'].unique()) if len(line_segments['objectName'].unique()) > 0 else 0
-            # lengthSTD = line_segments.groupby('objectName').apply(lambda seg: self.computeLineSegLength(seg)).std() #Should compute more efficiently
-            # text_lines.append(f"Total line segment length: {totalSegLength:.2f} nm")
+        segments = [r for r in rois if r.roiType == "LineSegmentROI"]
+        if segments and viewer._pxScale is not None:
+            lengths = [float(np.hypot(*np.diff(r.pointsArray(), axis=0).T).sum()) for r in segments]
+            avgLength = float(np.mean(lengths)) * viewer._pxScale
             text_lines.append(f"Avg GNR length: {avgLength:.2f} nm") # Should be better abstracted
 
         self.ui.textBrowser_2.setText('\n'.join(text_lines) if text_lines else "No ROIs or labels assigned yet.")
-
 
     def get_current_label(self):
         """Get the currently selected label from listWidget_2"""
@@ -939,74 +1151,70 @@ class ImageLabeling(QWidget):
         return None
 
     def on_label_selection_changed(self):
-        """Handle when label selection changes in listWidget_2"""
+        """Handle when label selection changes in listWidget_2: new ROIs get this label, and
+        the ROIs selected in the viewer are relabelled."""
         self.current_label = self.get_current_label()
-        self.current_viewer._currentLabel = self.current_label  # Update the viewer's current label
-        # If there's a selected ROI, update its label
-        if self.selected_roi is not None and self.current_label is not None:
-            self.labelUpdate(self.selected_roi, self.current_label)
+        viewer = self._current_viewer()
+        if viewer is None:
+            return
+        self.current_viewer = viewer
+        viewer._currentLabel = self.current_label or EMPTY_LABEL
+        if self._syncing_label:
+            return
+        selected = viewer.selectedROIs()
+        if selected and self.current_label is not None:
+            self.labelUpdate(selected, self.current_label)
 
-    def labelUpdate(self, roi, label):
+    def labelUpdate(self, rois, label):
         """
-        Update the label of the selected ROI.
-        :param roi: The selected ROI item.
-        :param label: The label to assign to the ROI.
+        Assign a label to ROIs (single ROI or list) of the current image.
         """
-        if roi and label:
-            if isinstance(roi, list):
-                roi = roi[0]
-            # Update the label in the annotations DataFrame
-            current_index = self.ui.stackedWidget.currentIndex()
-            if 0 <= current_index < len(self.image_paths):
-                roiType = roi.__class__.__name__
-                try: 
-                    # Update the label in the annotations DataFrame
-                    self.annotations_df.loc[self.annotations_df['objectName'] == roi[0], 'label'] = label
-                    self.getLabelExamples()    
-                except Exception as e:
-                    print(e)
-                    print(f"No label available")
-                self.labelTextDisplay(os.path.basename(self.image_paths[current_index]))    
-                self.current_viewer.deleteROI(roi)  # Remove the old ROI
-                # Create a new ROI with the updated label for correct color
-                self.current_viewer.addROIs(roi)
-            else:
-                self.updateBrowserText("No image selected.")
-        else:
+        viewer = self._current_viewer()
+        if viewer is None:
+            self.updateBrowserText("No image selected.")
+            return
+        if not isinstance(rois, (list, tuple)):
+            rois = [rois]
+        if not rois or not label:
             self.updateBrowserText("No matching annotation found for labeling.")
-    
+            return
+        changed = viewer.setROILabel(rois, label)
+        if len(changed) > 1:
+            self.updateBrowserText(f"Relabeled {len(changed)} ROIs as '{label}'.")
+
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts for label selection"""
         key = event.key()
         modifiers = event.modifiers()
 
-        # Handle number keys (0-9) for label selection or mode switching with Shift
+        # Handle number keys (0-9) for label selection or mode switching with Alt
         if QtCore.Qt.Key.Key_0 <= key <= QtCore.Qt.Key.Key_9:
             index = key - QtCore.Qt.Key.Key_0
             if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
-                # Switch modes based on number key (1-5)
-                if index == 1:
-                    self.activate_selection_mode()
-                elif index == 2:
-                    self.activate_zoom_mode()
-                elif index == 3:
-                    self.activate_bounding_box_mode()
-                elif index == 4:
-                    self.activate_vector_mode()
-                elif index == 5:
-                    self.activate_point_mode()
-                # Add more modes if needed
+                modes = {
+                    1: self.activate_selection_mode,
+                    2: self.activate_zoom_mode,
+                    3: self.activate_bounding_box_mode,
+                    4: self.activate_vector_mode,
+                    5: self.activate_point_mode,
+                    6: self.activate_line_segment_mode,
+                    7: self.activate_polygon_mode,
+                    8: self.activate_orientation_mode,
+                }
+                if index in modes:
+                    modes[index]()
                 return
             else:
                 if index < self.ui.listWidget_2.count():
-                    self.ui.listWidget_2.setCurrentRow(index) 
+                    self.ui.listWidget_2.setCurrentRow(index)
                     self.on_label_selection_changed()
                     return
-        
-        # Handle Escape key to deselect ROI
+
+        # Handle Escape key to deselect ROIs
         if key == QtCore.Qt.Key.Key_Escape:
-            if self.selected_roi is not None:
-                self.selected_roi = None
+            viewer = self._current_viewer()
+            if viewer is not None and viewer.selectedROIs():
+                viewer.clearSelection()
                 self.updateBrowserText("ROI deselected.")
                 return
 
@@ -1015,60 +1223,41 @@ class ImageLabeling(QWidget):
                 self.save_annotations()
         # Call parent's keyPressEvent for other keys
         super().keyPressEvent(event)
-  
+
     def getLabelExamples(self):
         """
         Get examples of labels from the label input dialog, add cropped images to widget.
-        Only show labels that have actual annotations in the current image.
+        Only show labels that have actual bounding boxes in the current image.
         """
         # Clear all widgets from the grid layout
-        for i in reversed(range(self.label_input_ui.gridLayout.count())): 
-            self.label_input_ui.gridLayout.itemAt(i).widget().setParent(None)
+        for i in reversed(range(self.label_editor.preview_grid.count())):
+            self.label_editor.preview_grid.itemAt(i).widget().setParent(None)
+        if not self.label_editor.previews.isChecked():
+            return              # previews section collapsed: nothing to show
 
-        current_index = self.ui.stackedWidget.currentIndex()
-        
-        if 0 <= current_index < len(self.image_paths):
-            image_path = self.image_paths[current_index]
-            filename = os.path.basename(image_path)
-            image = QtGui.QImage(image_path)
-            pixmap = QtGui.QPixmap.fromImage(image)
-            
-            # Get only labels that have actual annotations in the current image
-            current_image_annotations = self.annotations_df[
-                (self.annotations_df['type'] == 'RectROI') &
-                (self.annotations_df['file'] == filename) &
-                (self.annotations_df['label'].notna()) &  # Exclude NaN labels
-                (self.annotations_df['label'] != 'Empty Label')  # Exclude empty labels
-            ]
-            
-            # Get unique labels that have annotations
-            labels_with_annotations = current_image_annotations['label'].unique()
-            
-            for idx, label in enumerate(labels_with_annotations):
-                # Find the first instance of this label
-                matches = current_image_annotations[current_image_annotations['label'] == label]
-                if not matches.empty:
-                    first_instance = matches.iloc[0]
-                    x, y, dx, dy = first_instance['x1'], first_instance['y1'], first_instance['dx'], first_instance['dy']
-                    cropped = pixmap.copy(int(x), int(y), int(dx), int(dy))
-                    
-                    # Create label text widget
-                    label_text_widget = QLabel(f"{label}")
-                    label_text_widget.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                    
-                    # Create image widget
-                    image_widget = QLabel()
-                    image_widget.setPixmap(cropped.scaled(100, 100, QtCore.Qt.AspectRatioMode.KeepAspectRatio))
-                    
-                    # Add both widgets to the grid (2 columns: image, label)
-                    row = idx
-                    self.label_input_ui.gridLayout.addWidget(image_widget, row, 0)
-                    self.label_input_ui.gridLayout.addWidget(label_text_widget, row, 1)
-                    
-                    # print(f"Added label '{label}' example to grid at row {row}")
-            if set(self.labelList).issubset(set(labels_with_annotations)):
-                self.labels_ready = True
-  
+        viewer = self._current_viewer()
+        if viewer is None or not viewer.hasImage():
+            return
+        pixmap = viewer.pixmap()
+
+        # First bounding box of every (non-empty) label
+        first_box = {}
+        for roi in viewer.rois("RectROI"):
+            if roi.label and roi.label != EMPTY_LABEL and roi.label not in first_box:
+                first_box[roi.label] = roi
+
+        for row, (label, roi) in enumerate(first_box.items()):
+            cropped = pixmap.copy(roi.rect().toRect())
+            label_text_widget = QLabel(f"{label}")
+            label_text_widget.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            image_widget = QLabel()
+            image_widget.setPixmap(cropped.scaled(100, 100, QtCore.Qt.AspectRatioMode.KeepAspectRatio))
+            # 2 columns: image, label
+            self.label_editor.preview_grid.addWidget(image_widget, row, 0)
+            self.label_editor.preview_grid.addWidget(label_text_widget, row, 1)
+        if self.labelList and set(self.labelList).issubset(set(first_box)):
+            self.labels_ready = True
+
     def saveLabelExamples(self):
         """
         Save cropped images and parameter csv file for future loading.
@@ -1082,10 +1271,10 @@ class ImageLabeling(QWidget):
             save_dir = QFileDialog.getExistingDirectory(self, "Select Directory to Save Label Examples")
             if save_dir:
                 # Save cropped images
-                for i in range(self.label_input_ui.gridLayout.rowCount()):
+                for i in range(self.label_editor.preview_grid.rowCount()):
                     try:
-                        label_widget = self.label_input_ui.gridLayout.itemAtPosition(i, 1).widget()
-                        image_widget = self.label_input_ui.gridLayout.itemAtPosition(i, 0).widget()
+                        label_widget = self.label_editor.preview_grid.itemAtPosition(i, 1).widget()
+                        image_widget = self.label_editor.preview_grid.itemAtPosition(i, 0).widget()
                         label_text = label_widget.text()
                         pixmap = image_widget.pixmap()
                         if pixmap:
@@ -1167,11 +1356,8 @@ class ImageLabeling(QWidget):
                         continue
                     if label_name == "9AP": # Need to ultimately abstract this to work for any chiral label
                         continue
-                    if label_name not in self.labelList:
-                        self.labelList.append(label_name)
-                        # self.label_input_ui.listWidget.addItem(label_name)
-                        self.label_input_ui.treeWidget.addTopLevelItem(QTreeWidgetItem([label_name]))
-                        self.ui.listWidget_2.addItem(f"{len(self.labelList)}: {label_name}")
+                    if label_name not in self.label_manager:
+                        self.label_manager.add(label_name)
             pad = 2
             vectorList = []
             roi_df = pd.DataFrame(columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
@@ -1298,42 +1484,25 @@ class ImageLabeling(QWidget):
 
     def setSymmetryVector(self, roi):
         """
-        Set the symmetry vector based on the clicked position.
-        :param x: The x-coordinate of the click.
-        :param y: The y-coordinate of the click.
+        Use a VectorROI as the high symmetry axis: it is relabelled "Symmetry Vector" (any
+        previous symmetry vector of that image goes back to "Empty Label").
+        :param roi: the VectorROI.
         """
-        print("Setting symmetry vector...")
-        try:
-            if roi is None:
-                self.updateBrowserText("No vector ROI selected.")
-                return
-            # For a VectorROI, get the vector's dx and dy
-            # print(f"Selected ROI: {roi.__class__.__name__}")
-            if roi.__class__.__name__ == "VectorROI":
-                x1 = roi.line().x1()
-                y1 = roi.line().y1()
-                x2 = roi.line().x2()
-                y2 = roi.line().y2()
-                dx = (x2 - x1)
-                dy = -(y2 - y1)
-                self.symmetryVector = [dx, dy]
-                self.updateBrowserText(f"Symmetry vector set: dx={dx}, dy={dy}")
-                drawer = self.current_viewer.drawROI
-                # Temporarily set drawROI to "VectorROI" to remove the old vector
-                self.current_viewer.drawROI = "VectorROI"
-                self.current_viewer.deleteROI(roi)  # Remove the old vector ROI
-                self.current_viewer.roichanged = "loaded"  # Mark as added for roiUpdate
-                self.current_viewer.addROIs(roi, setColor = "#F5E400", labelOverride = "Symmetry Vector")
-                self.current_viewer.drawROI = drawer
-            else:
-                self.updateBrowserText("Selected ROI is not a vector.")
-            self.symmetryVectorMode = False
-            slope = dy / dx
-            self.ui.label_2.setText(f"Symmetry vector set: Slope = {slope}")
-        except Exception as e:
-            print(f"Error setting symmetry vector: {e}")
-            self.updateBrowserText(f"Error setting symmetry vector: {e}")
-            self.symmetryVectorMode = False
+        self.symmetryVectorMode = False
+        if roi is None or roi.roiType != "VectorROI":
+            self.updateBrowserText("Selected ROI is not a vector." if roi is not None else "No vector ROI selected.")
+            return
+        line = roi.line()
+        dx, dy = line.dx(), -line.dy()
+        self.symmetryVector = [dx, dy]
+        viewer = roi._viewer
+        previous = [r for r in viewer.rois("VectorROI") if r.label == SYMMETRY_LABEL and r is not roi]
+        if previous:
+            viewer.setROILabel(previous, EMPTY_LABEL)
+        viewer.setROILabel([roi], SYMMETRY_LABEL)
+        self.updateBrowserText(f"Symmetry vector set: dx={dx:.2f}, dy={dy:.2f}")
+        slope = f"{dy / dx:.4f}" if dx != 0 else "inf"
+        self.ui.label_2.setText(f"Symmetry vector set: Slope = {slope}")
 
     def correctVector(self):
         print("Correcting symmetry vector...")
@@ -1458,7 +1627,16 @@ class ImageLabeling(QWidget):
                     enantiomer = 'R'
                 else:
                     enantiomer = 'None'
-                # Find vectors inside this bounding box
+                # The box's own orientation (set in orientation mode / auto-orient) takes precedence
+                own = bbox.get('angle') if 'angle' in bbox.index else None
+                if own is not None and np.isfinite(own):
+                    sym_vec = np.array(self.symmetryVector)
+                    diff = np.radians(own) - np.arctan2(sym_vec[1], sym_vec[0])
+                    angle_deg = (360 - np.degrees(diff)) % 360
+                    results.append((bbox, angle_deg, enantiomer))
+                    angle_dict[enantiomer].append(angle_deg)
+                    continue
+                # Otherwise: find vectors inside this bounding box (older annotations)
                 for _, vec in vector_df.iterrows():
                     vx1, vy1, vx2, vy2 = vec['x1'], vec['y1'], vec['dx'], vec['dy']
                     # Check if both endpoints are inside the bounding box
@@ -1596,67 +1774,85 @@ class ImageLabeling(QWidget):
             image = imread(self.image_paths[current_index], as_gray=True)
 
             # Get the dimensions of the scan for coverage calculation
-            px_scale, scan_width, scan_height = self.get_scan_dim(filename)
-            if scan_width is None or scan_height is None:
+            self.get_scan_dim()
+            if self.current_viewer._imgShape[0] is None or self.current_viewer._imgShape[1] is None:
                 self.updateBrowserText(f"Could not determine scan dimensions for {filename}. Ignore GNR length evaluation.")
 
-            gnr_segments, gnr_binary, gnr_skeleton, gnr_distance_map, gnr_num_segments, gnr_avg_length, segment_endpoints = run_GNR_segment(image, px_scale=px_scale, sigma=None, block_size=11, num_bins=None, thresholds=None, plot_results=plot_results)
+            gnr_segments, gnr_binary, gnr_skeleton, gnr_distance_map, gnr_num_segments, gnr_avg_length, segment_endpoints = run_GNR_segment(image, px_scale=self.current_viewer._pxScale , gamma=None, threshold=None, sigma=None, block_size=11, num_bins=None, plot_results=plot_results)
 
-        roi_df = pd.DataFrame(columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
+        return gnr_binary
+        # roi_df = pd.DataFrame(columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])
 
-        for segment in segment_endpoints:
-            print(f"Adding GNR segment: {segment}")
-            roiData = []
-            x1, y1, dx, dy = segment
-            roiData = [[None, 'LineSegmentROI', x1, y1, dx, dy, filename, self.current_label]]
-            roi_df = pd.concat([roi_df, pd.DataFrame(roiData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
+        # for segment in segment_endpoints:
+        #     print(f"Adding GNR segment: {segment}")
+        #     roiData = []
+        #     x1, y1, dx, dy = segment
+        #     roiData = [[None, 'LineSegmentROI', x1, y1, dx, dy, filename, self.current_label]]
+        #     roi_df = pd.concat([roi_df, pd.DataFrame(roiData, columns=['objectName', 'type', 'x1', 'y1', 'dx', 'dy', 'file', 'label'])], ignore_index=True)
 
-        self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
-        self.ui.label_2.setText(f"Number of GNR segments found: {gnr_num_segments}")
-        self.updateBrowserText(f"GNR segmentation found {gnr_num_segments} segments.")
-        self.updateBrowserText(f"Average GNR length: {gnr_avg_length:.2f} nm.")
+        # self.current_viewer.loadROIs(roi_df, os.path.basename(self.image_paths[current_index]), "added")
+        # self.ui.label_2.setText(f"Number of GNR segments found: {gnr_num_segments}")
+        # self.updateBrowserText(f"GNR segmentation found {gnr_num_segments} segments.")
+        # self.updateBrowserText(f"Average GNR length: {gnr_avg_length:.2f} nm.")
 
     def computeLineSegLength(self, segment_roi):
-        segLength = 0.0
-        points = []
-        linearity = None
-        if segment_roi.iloc[0]['type'] == 'LineSegmentROI':
-            prev_x = prev_y = None
-            for point in segment_roi.itertuples():
-                x1 = point.x1
-                y1 = point.y1
-                if x1 is None or y1 is None:
-                    continue
-                points.append((float(x1), float(y1)))
-                if prev_x is not None and prev_y is not None:
-                    dx = x1 - prev_x
-                    dy = y1 - prev_y
-                    segLength += (dx ** 2 + dy ** 2) ** 0.5
-                prev_x, prev_y = x1, y1
+        """
+        Stats of one line segment given as its annotation rows (DataFrame with x1, y1 columns).
+        Returns (length_nm or None, length_px, r_squared, linearity).
+        """
+        if segment_roi.empty or segment_roi.iloc[0]['type'] != 'LineSegmentROI':
+            return None, 0.0, None, None
+        px_scale = self.current_viewer._pxScale if self.current_viewer is not None else None
+        return polyline_stats(segment_roi[['x1', 'y1']].to_numpy(dtype=float), px_scale)
 
-            if len(points) >= 2:
-                x = np.asarray([p[0] for p in points], dtype=float)
-                y = np.asarray([p[1] for p in points], dtype=float)
+    def convert_all_lines_to_polygons(self):
+        """
+        Converts all LineSegmentROI items in the current image to PolygonROIs
+        based on a user-prompted thickness and end buffer.
+        """
+        viewer = self._current_viewer()
+        if viewer is None:
+            self.updateBrowserText("No image selected.")
+            return
+        self.current_viewer = viewer
 
-                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        lines = viewer.rois("LineSegmentROI")
+        if not lines:
+            self.updateBrowserText("No line segment ROIs found in the current image.")
+            return
 
-                p1 = np.array([x[0], y[0]])
-                p2 = np.array([x[-1], y[-1]])
-                
-                # Straight-line distance
-                ideal_length = np.linalg.norm(p2 - p1)
-                if ideal_length == 0:
-                    linearity = 100.0
-                else:
-                    # Cumulative path distance
-                    if segLength == 0:
-                        linearity = 100.0
-                    else:
-                        ratio = ideal_length / segLength
-                        linearity = float(np.clip(ratio * 100.0, 0, 100.0))
+        # Prompt for thickness and end buffer
+        thickness_nm, ok = QInputDialog.getDouble(
+            self, "Convert All Line Segments to Polygons", "Enter polygon thickness (nm):", value=2.0, min=0.1, max=10.0, decimals=2
+        )
+        if not ok:
+            return
 
-        seglength_nm = segLength * self.current_viewer._pxScale if self.current_viewer._pxScale else None
-        return seglength_nm, segLength, r_value**2, linearity
+        end_buffer_nm, ok2 = QInputDialog.getDouble(
+            self, "Convert All Line Segments to Polygons", "Enter end buffer length (nm):", value=0.5, min=0.0, max=5.0, decimals=2
+        )
+        if not ok2:
+            return
+
+        # ROI coordinates are pixels; _pxScale is the physical size of one pixel in nm.
+        px_scale = getattr(viewer, '_pxScale', None)
+        if px_scale is None or px_scale <= 0:
+            self.updateBrowserText("Cannot convert nm to pixels: pixel scale is unavailable.")
+            return
+        half_t = thickness_nm / px_scale / 2.0
+        end_buffer = end_buffer_nm / px_scale
+
+        converted, polygons = [], []
+        for roi in lines:
+            pts = roi.pointsArray()
+            if len(pts) < 2:
+                continue
+            polygons.append(viewer.createROI("PolygonROI", thicken_polyline(pts, half_t, end_buffer), roi.label))
+            converted.append(roi)
+
+        viewer.deleteROIs(converted)
+        viewer.addROIs(polygons)
+        self.updateBrowserText(f"Successfully converted {len(converted)} line segment(s) to PolygonROIs with thickness {thickness_nm} nm and buffer {end_buffer_nm} nm.")
 
     def plotLineSegResults(self):
         filename = os.path.basename(self.image_paths[self.ui.stackedWidget.currentIndex()])
@@ -1858,9 +2054,13 @@ class ImageLabeling(QWidget):
                 bw = float(bbox["dx"])
                 bh = float(bbox["dy"])
 
-                # Match orientation from first vector inside bbox
+                # The box's own orientation, else the first vector inside the box (older annotations)
                 angle = None
-                for _, line in file_lines.iterrows():
+                own = bbox.get("angle") if "angle" in bbox.index else None
+                if own is not None and np.isfinite(own):
+                    sym = np.array(self.symmetryVector)
+                    angle = (360 - (own - np.degrees(np.arctan2(sym[1], sym[0])))) % 360
+                for _, line in ([] if angle is not None else file_lines.iterrows()):
                     if _bbox_contains_line(bbox, line):
                         angle = _vector_angle_deg(line)
                         break
@@ -1906,6 +2106,42 @@ class ImageLabeling(QWidget):
 
         self.updateBrowserText(f"Saved {saved_total} clips to {out_root}")
 
+    def open_roi_analysis(self):
+        """Open (or bring to front) the ROI analysis window (core/roi_analysis_dialog.py)."""
+        from core.roi_analysis_dialog import RoiAnalysisDialog
+        if self._roi_analysis_dialog is None:
+            self._roi_analysis_dialog = RoiAnalysisDialog(self._roi_analysis_data, parent=self)
+        else:
+            self._roi_analysis_dialog.refresh_labels()
+        self._roi_analysis_dialog.show()
+        self._roi_analysis_dialog.raise_()
+        self._roi_analysis_dialog.activateWindow()
+
+    def _roi_analysis_data(self, scope):
+        """Analysis input for the current image ("current") or every loaded image ("all")."""
+        from core.roi_analysis import AnalysisData, ImageInfo
+        if scope == "current":
+            viewer = self._current_viewer()
+            viewers = [viewer] if viewer is not None else []
+        else:
+            viewers = self._viewers()
+        images, frames = {}, []
+        for viewer in viewers:
+            if not viewer.hasImage() or not viewer._imgPath:
+                continue
+            file = os.path.basename(viewer._imgPath)
+            pixmap = viewer.pixmap()
+            path = viewer._imgPath
+            images[file] = ImageInfo(file, pixmap.width(), pixmap.height(), viewer._pxScale or None,
+                                     ref_angle=self.reference_angle(viewer),
+                                     image=lambda p=path: imread(p, as_gray=True))   # loaded only for maps
+            frames.append(viewer.annotationsFrame())
+        frames = [f for f in frames if len(f)]
+        annotations = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=FRAME_COLUMNS)
+        colors = {label: label_color(label, self.labelList) for label in self.labelList}
+        colors[SYMMETRY_LABEL] = "#F5E400"
+        return AnalysisData(annotations, images, colors)
+
     def showResults(self):
         if any("9AP" in str(label) for label in self.labelList):
             self.get_vector_angles_within_9AP()
@@ -1921,7 +2157,8 @@ class ImageLabeling(QWidget):
             "Select YOLO Model Weights",
             "",
             "PyTorch Model Files (*.pt);;All Files (*)",
-            options=options
+            options=options,
+
         )
         if model_path:
             self.ui.label_2.setText(f"Select classes to predict, then run your ML predictions.")
@@ -1946,6 +2183,36 @@ class ImageLabeling(QWidget):
             self.ui.label_2.setText("No model selected.")
             self.updateBrowserText("No YOLO model weights selected.")
             self.predictions_ui.label.setText("Model: None")
+
+    def auto_segment_to_rois(self):
+        """
+        Quick auto-segmentation of the current image (mask from runGNRSegmentation) into
+        one ROI per distinct object.  For full control use the image adaptation dialog
+        (adaptImage_show), which shares the same ROI generation (core.roi_extraction)
+        and the same self.roi_settings.
+        """
+        import dataclasses
+        from core.roi_extraction import RoiSettings, extract_objects
+
+        current_index = self.ui.stackedWidget.currentIndex()
+        if 0 <= current_index < len(self.image_paths):
+            filename = os.path.basename(self.image_paths[current_index])
+        else:
+            self.updateBrowserText("No image selected.")
+            return
+
+        # Prompt user for target ROI conversion format
+        roi_options = ["PolygonROI", "RectROI", "LineSegmentROI", "PointROI"]
+        choice, ok = QInputDialog.getItem(
+            self, "Auto Threshold Segmentation", "Select output ROI type:", roi_options, 0, False
+        )
+        if not ok:
+            return
+
+        cleaned = self.runGNRSegmentation()     # binary mask (also clears existing annotations)
+        settings = dataclasses.replace(self.roi_settings or RoiSettings(), roi_type=choice)
+        objects = extract_objects(np.asarray(cleaned, dtype=bool), settings)
+        self._add_objects_as_rois(objects, filename)
 
     def makePrediction(self):
         from core.yolo_predict import predict_bounding_boxes
@@ -1979,11 +2246,9 @@ class ImageLabeling(QWidget):
             output_image_path="prediction_output.jpg"
         )
 
-        # prediction_results.to_csv("prediction_results.csv", index=False)    
-        if self.predictions_ui.checkBox.isChecked():
-            self.clearAnnotations()
-            
-        self.load_annotations(prediction_results = prediction_results, classes = classes)
+        # prediction_results.to_csv("prediction_results.csv", index=False)
+        self.load_annotations(prediction_results=prediction_results, classes=classes,
+                              replace=self.predictions_ui.checkBox.isChecked())
         self.ui.label_2.setText("Prediction complete.")
             
 
@@ -1991,4 +2256,3 @@ def handleLeftClick(x, y):
     row = int(y)
     column = int(x)
     print("Clicked on image pixel (row="+str(row)+", column="+str(column)+")")
-    

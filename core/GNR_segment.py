@@ -38,8 +38,7 @@ def mask_step_edges(img, binary_mask):
     return clean_gnr_mask
 
 
-
-def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins=None, thresholds=None, plot_results=False):
+def create_image_mask(image, gamma, threshold, sigma):
     img = (image - image.min()) / (image.max() - image.min())
 
     img = terrace_safe_flatten(img) # Required when multiple terraces with gradients are present.
@@ -53,8 +52,12 @@ def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins
     img_smooth = exposure.rescale_intensity(img_smooth, in_range=(0.40, 1.0), out_range=(0, 1)) # Required when Au111 herringbones are present
 
     # Adaptive thresholding
-    if block_size is None:
+    block_size = 3
+    if threshold is None:
         block_size = int(img.shape[0] / 20) | 1  # Ensure block_size is odd
+    else:
+        block_size = threshold | 1
+    print(f"Using block size: {block_size} for adaptive thresholding.")
 
     local_thresh = threshold_local(img_smooth, block_size, offset=0, method='gaussian')
 
@@ -70,7 +73,11 @@ def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins
     binary_clean = erosion(binary_clean.astype(bool), selem)
     
     # binary_clean = mask_step_edges(img_smooth, binary_clean)
+    return binary_clean
 
+def run_GNR_segment(image, px_scale=None, gamma=None, threshold=None, sigma=None, block_size= None, num_bins=None, plot_results=False):
+    img = (image - image.min()) / (image.max() - image.min())
+    binary_clean = create_image_mask(image, gamma, threshold, sigma)
     # Skeletonization
     img_skeleton = skeletonize(binary_clean)
 
@@ -196,7 +203,7 @@ def run_GNR_segment(image, px_scale=None, sigma=None, block_size= None, num_bins
 
 
         # # Optionally, visualize pinches
-        axs[0].imshow(img_smooth, cmap='gray')
+        axs[0].imshow(img, cmap='gray')
         axs[0].set_title("Original Image")
         axs[0].axis('off')
 

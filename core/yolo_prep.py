@@ -8,61 +8,60 @@ import cv2
 import albumentations as A
 
 
-def get_classes(csv_path: str,):
+def get_classes(csv_path: str):
     """
-    Extracts unique class labels from a CSV file and returns a mapping of label to integer class ID.
+    Extracts unique class labels from a CSV file (supporting RectROI and PolygonROI) 
+    and returns a mapping of label to integer class ID.
     """
     cols = {
-            'objectName': 'objectName',
-            'type': 'type',
-            'x1': 'x1',
-            'y1': 'y1',
-            'dx': 'dx',
-            'dy': 'dy',
-            'file': 'file',
-            'label': 'label',
-        }
+        'objectName': 'objectName',
+        'type': 'type',
+        'x1': 'x1',
+        'y1': 'y1',
+        'dx': 'dx',
+        'dy': 'dy',
+        'file': 'file',
+        'label': 'label',
+    }
 
     df = pd.read_csv(csv_path)
 
-    # 1. Filter for RectROI entries
+    # Filter for RectROI and PolygonROI entries
     if cols['type'] in df.columns:
-        roi_df = df[df[cols['type']].astype(str).str.strip() == 'RectROI'].copy()
+        roi_df = df[df[cols['type']].astype(str).str.strip().isin(['RectROI', 'PolygonROI'])].copy()
     else:
         roi_df = df.copy()
 
     if roi_df.empty:
-        print("No 'RectROI' records found in the provided CSV file.")
-        return
+        print("No 'RectROI' or 'PolygonROI' records found in the provided CSV file.")
+        return None
 
     if cols['label'] in roi_df.columns:
         roi_counts = roi_df[cols['label']].value_counts()
         class_mapping = pd.DataFrame({
             'label': roi_counts.index,
             'roi_count': roi_counts.values,
-            'type' : 'RectROI'
+            'type': 'Mixed'
         })
-        # class_mapping.drop(class_mapping[class_mapping['label'] == 'Empty Label'].index, inplace=True)
-        
     else:
         return None
     return class_mapping
 
 
-
-def convert_rectroi_csv_to_yolo(
+def convert_csv_to_yolo(
     input_dir: str,
     csv_path: str,
     output_dir: str,
     column_mapping: dict = None,
     class_mapping: dict = None
-    ):
+):
     """
-    Converts CSV bounding box rows of type 'RectROI' into YOLO annotation format.
+    Converts CSV annotation rows of type 'RectROI' (YOLO bbox format) 
+    and 'PolygonROI' (YOLO segmentation polygon format) into YOLO format.
     
-    YOLO line format: <class_id> <x_center> <y_center> <width> <height> (0.0 to 1.0)
+    YOLO bbox format: <class_id> <x_center> <y_center> <width> <height>
+    YOLO polygon format: <class_id> <x1> <y1> <x2> <y2> ... <xn> <yn> (normalized 0.0 to 1.0)
     """
-    # Standard default CSV column names (adjust in function call if your CSV differs)
     cols = {
         'objectName': 'objectName',
         'type': 'type',
@@ -77,18 +76,9 @@ def convert_rectroi_csv_to_yolo(
         cols.update(column_mapping)
 
     df = pd.read_csv(csv_path)
+    roi_df = df.copy()
 
-    # 1. Filter for RectROI entries
-    if cols['type'] in df.columns:
-        roi_df = df[df[cols['type']].astype(str).str.strip() == 'RectROI'].copy()
-    else:
-        roi_df = df.copy()
-
-    if roi_df.empty:
-        print("No 'RectROI' records found in the provided CSV file.")
-        return
-
-    # 2. Build class label mapping (text label -> integer class_id)
+    # Build class label mapping (text label -> integer class_id)
     if class_mapping is None:
         if cols['label'] in roi_df.columns:
             unique_labels = sorted(roi_df[cols['label']].dropna().unique())
@@ -99,63 +89,80 @@ def convert_rectroi_csv_to_yolo(
 
     label_outdir = os.path.join(output_dir, "labels")
     images_outdir = os.path.join(output_dir, "images")
+    os.makedirs(label_outdir, exist_ok=True)
+    os.makedirs(images_outdir, exist_ok=True)
 
-
-    # 3. Process annotations grouped by image
+    # Process annotations grouped by image file
     grouped = roi_df.groupby(cols['file'])
 
     for img_name, group in grouped:
         annotations = []
-        
-        # Get image dimensions from CSV or read directly from the image file
         img_w, img_h = None, None
-        # if cols['img_w'] in group.columns and cols['img_h'] in group.columns:
-        #     img_w = float(group[cols['img_w']].iloc[0])
-        #     img_h = float(group[cols['img_h']].iloc[0])
-        if images_outdir:
-            try:
-                # CSV values may already include the image directory. Use the
-                # filename component to avoid constructing a duplicated path.
-                img_file = input_dir + "/" + img_name
-                with Image.open(img_file) as img:
-                    img_w, img_h = img.size
-            except Exception as e:
-                print(f"Error reading image {img_name}. Skipping: {e}")
-                continue
 
-        for _, row in group.iterrows():
+        try:
+            img_file = os.path.join(input_dir, img_name)
+            with Image.open(img_file) as img:
+                img_w, img_h = img.size
+        except Exception as e:
+            print(f"Error reading image {img_name}. Skipping: {e}")
+            continue
+
+        # 1. Process RectROI (Bounding Boxes)
+        rect_rows = group[group[cols['type']].astype(str).str.strip() == 'RectROI']
+        for _, row in rect_rows.iterrows():
             x = float(row[cols['x1']])
             y = float(row[cols['y1']])
             w = float(row[cols['dx']])
             h = float(row[cols['dy']])
 
-            # Extract class ID
             label = row.get(cols['label'], 'default')
+            if label == 'EmptyLabel':
+                continue
             class_id = int(class_mapping.get(label, 0))
-            # print(f"Processing {img_name}: Label '{label}' mapped to class ID {class_id}. With coordinates x={x}, y={y}, w={w}, h={h} and image size {img_w}x{img_h}")
-            # Convert corner coordinates to YOLO normalized center format
+
             x_center = max(0.0, min(1.0, (x + w / 2.0) / img_w))
             y_center = max(0.0, min(1.0, (y + h / 2.0) / img_h))
             norm_w = max(0.0, min(1.0, w / img_w))
             norm_h = max(0.0, min(1.0, h / img_h))
-            # print(f"Image: {img_name}, Class: {label} ({class_id}), YOLO: {x_center:.6f}, {y_center:.6f}, {norm_w:.6f}, {norm_h:.6f}")
+
             annotations.append(f"{class_id} {x_center:.6f} {y_center:.6f} {norm_w:.6f} {norm_h:.6f}")
 
-        # Save annotation file using image stem name (e.g., image1.jpg -> image1.txt)
+        # 2. Process PolygonROI (Segmentation Polygons)
+        poly_rows = group[group[cols['type']].astype(str).str.strip() == 'PolygonROI']
+        if not poly_rows.empty:
+            for obj_name, poly_group in poly_rows.groupby(cols['objectName']):
+                label = poly_group.iloc[0][cols['label']]
+                if label == 'Empty Label' or label == 'EmptyLabel':
+                    continue
+                class_id = int(class_mapping.get(label, 0))
+
+                poly_coords = []
+                for _, row in poly_group.iterrows():
+                    x = float(row[cols['x1']])
+                    y = float(row[cols['y1']])
+                    x_norm = max(0.0, min(1.0, x / img_w))
+                    y_norm = max(0.0, min(1.0, y / img_h))
+                    poly_coords.append(f"{x_norm:.6f} {y_norm:.6f}")
+
+                if poly_coords:
+                    annotations.append(f"{class_id} " + " ".join(poly_coords))
+
+        # Save annotation file
         txt_filename = Path(str(img_name)).stem + ".txt"
-        with open(label_outdir + "\\" + txt_filename, "w") as f:
+        with open(os.path.join(label_outdir, txt_filename), "w") as f:
             f.write("\n".join(annotations))
 
-        shutil.copy2(os.path.join(input_dir, img_name), os.path.join(images_outdir, img_name))  # Copy image to output images dir
-
-    # print(f"Successfully processed {len(grouped)} images. Annotations written to '{label_outdir}'.")
+        # Copy corresponding image to output folder
+        src_img_path = os.path.join(input_dir, img_name)
+        if os.path.exists(src_img_path):
+            shutil.copy2(src_img_path, os.path.join(images_outdir, img_name))
 
 
 def split_yolo_dataset(
     data_dir: str,
     val_ratio: float = 0.2,
     seed: int = 42
-    ):
+):
     """
     Splits image and label files into train/val subsets.
     """
@@ -164,7 +171,6 @@ def split_yolo_dataset(
     images_path = data_dir + "\\images"
     labels_path = data_dir + "\\labels"
 
-    # Output directory structure
     train_img_dir = data_dir + "\\images\\train"
     val_img_dir = data_dir + "\\images\\val"
     train_lbl_dir = data_dir + "\\labels\\train"
@@ -174,8 +180,6 @@ def split_yolo_dataset(
         os.makedirs(p, exist_ok=True)
 
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-
-    # Match image files with generated label files
     matched_pairs = []
 
     for img_file in os.listdir(images_path):
@@ -190,7 +194,6 @@ def split_yolo_dataset(
         print("No matching image-label pairs found!")
         return
 
-    # Random split
     random.shuffle(matched_pairs)
     val_size = int(len(matched_pairs) * val_ratio)
     val_pairs = matched_pairs[:val_size]
@@ -206,7 +209,6 @@ def split_yolo_dataset(
     print(f"Dataset split complete: {len(train_pairs)} train, {len(val_pairs)} val.")
 
 
-
 def augment_yolo_dataset(
     images_dir: str,
     labels_dir: str,
@@ -217,7 +219,6 @@ def augment_yolo_dataset(
     """
     Applies spatial and color transformations to images and updates YOLO bounding boxes.
     """
-    # Define augmentation pipeline (bbox_params ensures coordinates update correctly)
     transform = A.Compose([
         A.HorizontalFlip(p=0.5),
         A.RandomBrightnessContrast(p=0.5),
@@ -232,28 +233,24 @@ def augment_yolo_dataset(
         A.GaussianBlur(blur_limit=(3, 5), p=0.3),
     ], bbox_params=A.BboxParams(format='yolo', label_fields=['category_ids'], min_visibility=0.3, clip=True))
 
-
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
     img_files = [f for f in Path(images_dir).iterdir() if f.suffix.lower() in image_extensions]
 
     for img_file in img_files:
-
         lbl_file = labels_dir + "\\" + f"{img_file.stem}.txt"
+        if not os.path.exists(lbl_file):
+            continue
 
         image = cv2.imread(str(img_file))
         if image is None:
             continue
 
-        # Parse existing YOLO annotations
         bboxes, category_ids = [], []
         with open(lbl_file, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) == 5:
-                    bbox = [float(x) for x in parts[1:]]  # [x_center, y_center, w, h]
-                    # Albumentations expects YOLO boxes as center/width/height,
-                    # not [x_min, y_min, x_max, y_max].  Reject malformed or
-                    # zero-area boxes before it converts them to corner format.
+                    bbox = [float(x) for x in parts[1:]]
                     if (
                         0.0 <= bbox[0] <= 1.0 and 0.0 <= bbox[1] <= 1.0
                         and 0.0 < bbox[2] <= 1.0 and 0.0 < bbox[3] <= 1.0
@@ -261,12 +258,6 @@ def augment_yolo_dataset(
                         category_ids.append(int(float(parts[0])))
                         bboxes.append(bbox)
 
-        # Copy original image & label to output folder
-        # cv2.imwrite(str(output_images_dir + "\\" + img_file.name), image)
-        # with open(lbl_file, 'w') as f:
-        #     f.write(lbl_file)
-
-        # Generate augmented variations
         for i in range(num_aug_per_image):
             try:
                 transformed = transform(image=image, bboxes=bboxes, category_ids=category_ids)
@@ -277,10 +268,8 @@ def augment_yolo_dataset(
                 aug_img_name = f"{img_file.stem}_aug{i}{img_file.suffix}"
                 aug_lbl_name = f"{img_file.stem}_aug{i}.txt"
 
-                # Save transformed image
                 cv2.imwrite(str(output_images_dir + "\\" + aug_img_name), aug_image)
 
-                # Save updated YOLO labels
                 lines = [
                     f"{c} {b[0]:.6f} {b[1]:.6f} {b[2]:.6f} {b[3]:.6f}"
                     for c, b in zip(aug_cls, aug_bboxes)
@@ -293,8 +282,8 @@ def augment_yolo_dataset(
 
     print(f"Augmentation complete. Saved to '{output_images_dir}' and '{output_labels_dir}'.")
 
+
 if __name__ == "__main__":
-    # Example usage
     classes = {"label1": 0, "label2": 1}
 
     split_yolo_dataset(

@@ -14,7 +14,8 @@ ui_files = [
 	("./ui/popUps/imageProcessing.ui", "./ui/popUps/imageProcessing_ui.py"),
 	("./ui/popUps/automaticAnnotation.ui", "./ui/popUps/automaticAnnotation_ui.py"),
 	("./ui/popUps/predictions.ui", "./ui/popUps/predictions_ui.py"),
-    ("./ui/popUps/setupML.ui", "./ui/popUps/setupML_ui.py")
+    ("./ui/popUps/setupML.ui", "./ui/popUps/setupML_ui.py"),
+	("./ui/popUps/adaptImage.ui", "./ui/popUps/adaptImage_ui.py")
 ]
 
 for input_file, output_file in ui_files:

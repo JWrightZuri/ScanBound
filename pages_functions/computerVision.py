@@ -2,9 +2,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QInputDialog, QTreeWidgetItem,
 import PyQt6.QtGui as QtGui
 import PyQt6.QtCore as QtCore
 from PyQt6.QtCore import QThread, QObject, pyqtSignal
-from core.yolo_prep import split_yolo_dataset
-from core.yolo_prep import convert_rectroi_csv_to_yolo
-from core.yolo_prep import augment_yolo_dataset
+from core.yolo_prep import convert_csv_to_yolo, split_yolo_dataset
+# from core.yolo_prep import augment_yolo_dataset
 from core.yolo_prep import get_classes
 from core.yolo_predict import predict_bounding_boxes
 from ui.popUps.setupML_ui import Ui_Form as Ui_setupML
@@ -16,7 +15,7 @@ import sys
 import yaml
 import pandas as pd
 from pathlib import Path
-
+import torch
 
 class EmittingStream(QObject):
     """
@@ -66,37 +65,25 @@ class TrainingWorker(QObject):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, yolo_train_module, classes, data_yaml_path, model_weights,
-                 epochs, batch_size, project_name, run_name, device, augmentations):
+    def __init__(self, yolo_train_module, save_dir, classes, data_yaml_path, model_weights,
+                 epochs, batch_size, project_name, run_name, device, augmentations, augmentations_custom):
         super().__init__()
-        self.yolo_train_module = yolo_train_module
-        self.data_yaml_path = data_yaml_path
-        self.model_weights = model_weights
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.project_name = project_name
-        self.run_name = run_name
-        self.device = device
-        self.classes = classes
-        self.augmentations = augmentations  # Default to no augmentations; can be set externally if needed.
 
-    def run(self):
-        # try:
-        results_dir = self.yolo_train_module.train_yolo_model(
-            data_yaml_path=self.data_yaml_path,
-            classes=self.classes,
-            model_weights=self.model_weights,
-            epochs=self.epochs,
-            batch_size=self.batch_size,
-            project_name=self.project_name,
-            run_name=self.run_name,
-            augmentations=self.augmentations,
-            device=self.device
+        results_dir = yolo_train_module.train_yolo_model(
+            data_yaml_path=data_yaml_path,
+            save_dir=save_dir,
+            classes=classes,
+            model_weights=model_weights,
+            epochs=epochs,
+            batch_size=batch_size,
+            project=project_name,
+            name=run_name,
+            augmentations=augmentations,
+            augmentations_custom=augmentations_custom,
+            device=device
 
         )
-        self.finished.emit(results_dir)
-        # except Exception as e:
-        #     self.error.emit(str(e))
+        self.finished.emit(str(results_dir))
 
 
 class computerVision(QWidget):
@@ -120,7 +107,7 @@ class computerVision(QWidget):
         self.setupML_ui.pushButton_5.clicked.connect(self.clear_directories) 
         self.setupML_ui.pushButton_3.clicked.connect(self.setup_yolo)   
         self.setupML_ui.pushButton_4.clicked.connect(self.set_base_directory)   
-        self.setupML_ui.lineEdit.textChanged.connect(self.update_model_name)
+        # self.setupML_ui.pushButton_4.clicked.connect(self.set_base_directory)   
         self.setupML_ui.treeWidget.setAcceptDrops(True)
         self.setupML_ui.treeWidget.installEventFilter(self)
     
@@ -128,12 +115,14 @@ class computerVision(QWidget):
         self.class_mapping = pd.DataFrame(columns=["label", "roi_count", "type"])  # Initialize class_mapping as an empty DataFrame
 
         self.valid_directories = []
-        self.base_dir = r".\data\user_data"
-        self.model_name = self.setupML_ui.lineEdit.text() if self.setupML_ui.lineEdit.text() else "myModel"
-        self.proj_name = ""
-        self.run_name = ""
-        self.yolo_data = os.path.join(self.base_dir, self.model_name) if self.model_name else os.path.join(self.base_dir, "myModel")
-        self.setupML_ui.label_4.setText(f"Output location: {self.yolo_data}")
+        self.base_dir = r".\data\user_data\yolo_training"  # Default base directory for YOLO training data
+        self.setupML_ui.label_2.setText(f"Destination: {self.base_dir}")
+        self.results_dir = None  # Initialize results_dir to None
+        self.project = "yolo_training"  # Default project name
+        self.name = "detector" # Default run name
+        # self.yolo_data = os.path.join(self.base_dir, self.model_name) if self.model_name else os.path.join(self.base_dir, "myModel")
+        self.yolo_data = None
+        self.setupML_ui.label_2.setText(f"Output location: {self.base_dir}")
         self.image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
         self.annotation_extensions = {".csv", ".yolo"}
 
@@ -141,12 +130,15 @@ class computerVision(QWidget):
         self.ui.pushButton_2.clicked.connect(self.open_setupML)
         self.ui.pushButton_4.clicked.connect(self.run_training)
         self.ui.pushButton_5.clicked.connect(self.return_to_imageLabeling)
+        # self.ui.pushButton_7.clicked.connect(self.set_base_directory)
+        self.ui.lineEdit.textChanged.connect(self.update_dirs)
+        self.ui.lineEdit_2.textChanged.connect(self.update_dirs)
+        self.ui.label_3.hide()
 
-        self.populate_chart_selection()
-        self.ui.comboBox.currentIndexChanged.connect(lambda: self.update_displayed_chart(self.ui.label_4, self.ui.comboBox.currentText()))
-        self.ui.comboBox_6.currentIndexChanged.connect(lambda: self.update_displayed_chart(self.ui.label_20, self.ui.comboBox_6.currentText()))
-        self.ui.comboBox_7.currentIndexChanged.connect(lambda: self.update_displayed_chart(self.ui.label_19, self.ui.comboBox_7.currentText()))
-        self.ui.comboBox_8.currentIndexChanged.connect(lambda: self.update_displayed_chart(self.ui.label_21, self.ui.comboBox_8.currentText()))
+
+        # self.populate_chart_selection()
+        # self.ui.comboBox.currentIndexChanged.connect(lambda: self.update_displayed_chart(self.ui.label_4, self.ui.comboBox.currentText()))
+        # self.ui.comboBox_7.currentIndexChanged.connect(lambda: self.update_displayed_chart(self.ui.label_19, self.ui.comboBox_7.currentText()))
 
 
     def eventFilter(self, watched, event):
@@ -177,14 +169,14 @@ class computerVision(QWidget):
         # Open a dialog to select the base directory for ML models
         base_directory = QFileDialog.getExistingDirectory(
             self,
-            "Select Base Directory for ML Models",
+            "Select Destination for ML training data",
             os.getcwd(),
             QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontResolveSymlinks | QFileDialog.Option.DontUseNativeDialog
         )
         if base_directory:
             self.base_dir = base_directory
             print(f"Base directory set to: {self.base_dir}")
-            self.update_model_name(self.setupML_ui.lineEdit.text())
+            self.setupML_ui.label_2.setText(f"Destination: {self.base_dir}")
 
     def load_inputs(self):
         # Open a dialog to select the output directory for training results
@@ -195,9 +187,16 @@ class computerVision(QWidget):
             QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontResolveSymlinks | QFileDialog.Option.DontUseNativeDialog
         )
         if input_directory:
+            self.base_dir = os.path.dirname(input_directory)
             self.yolo_data = input_directory
             print(f"Input directory set to: {self.yolo_data}")
-            self.ui.label_6.setText(f"Input location: {self.yolo_data}")
+            self.project = os.path.basename(input_directory)  # Use the last part of the path as the project name
+            self.ui.lineEdit_2.setText(str(self.project))
+            self.update_dirs()
+            self.ui.label_3.show()
+            self.update_results_table()
+            self.populate_chart_selection()
+
         else:
             print("No input directory selected.")
             return
@@ -219,10 +218,16 @@ class computerVision(QWidget):
             item.setCheckState(QtCore.Qt.CheckState.Checked)
             class_list.addItem(item)
 
-    def update_model_name(self, model_name):
-        self.model_name = model_name or "myModel"
-        self.yolo_data = os.path.join(self.base_dir, self.model_name)
-        self.setupML_ui.label_4.setText(f"Output location: {self.yolo_data}")
+        self.ui.pushButton_4.setEnabled(True)  # Enable the training button after loading inputs
+    
+    def update_dirs(self):
+        # self.ui.label_10.setText(f"Input FData: {self.yolo_data}")
+        self.project = self.ui.lineEdit_2.text() if self.ui.lineEdit_2.text() else "yolo_training"
+        self.name = self.ui.lineEdit.text() if self.ui.lineEdit.text() else "trained_model"
+        self.results_dir = os.path.join(str(self.base_dir),self.project, self.name)  # Update results_dir to point to the expected output location
+        
+        self.ui.label_3.setText(f"Output destination: \n {self.results_dir}")
+
 
     def choose_directories(self):
         # Open a dialog to select multiple directories
@@ -237,11 +242,6 @@ class computerVision(QWidget):
 
     def add_directory(self, directories=None):
         # Directories selection. They must contain a combination of images and annotations in native or YOLO format.
-        # directories = [r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240326_PdGaA111_279a_3min_-175C_RT\saved_output", 
-        #                r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240327_PdGaA111_279a_3min_-175C_RT_-100C\saved_output",
-        #                r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240327_PdGaA111_279a_3min_-175C_RT_-100C_-40C\saved_output",
-        #                r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240327_PdGaA111_279a_3min_-175C_RT_-100C_-40C_24C\saved_output",
-        #                r"C:\Users\wrja\Desktop\STM_Data\Orito_Reaction\LT\PdGaA(111)_Pd1_CX3-2\20240328_PdGaA111_279a_3min_-175C_RT_-100C_-40C_24C_77C\saved_output"]
 
         if directories is None:
             return
@@ -337,8 +337,10 @@ class computerVision(QWidget):
             print("No valid directories selected. Please select directories containing images and annotations.")
             return
 
-        self.yolo_data = os.path.join(self.base_dir, self.model_name)  # Update the yolo_data path to the new model directory
-        self.ui.label_6.setText(f"Input location: {self.yolo_data}")
+        self.yolo_data = self.base_dir
+        self.update_dirs()
+        self.ui.label_3.show()
+
 
         os.mkdir(self.yolo_data) if not os.path.exists(self.yolo_data) else None
         os.mkdir(os.path.join(self.yolo_data, "images")) if not os.path.exists(os.path.join(self.yolo_data, "images")) else None
@@ -354,7 +356,7 @@ class computerVision(QWidget):
                 # TODO: Make this more robust to handle different file names and formats.
                 file_path = os.path.join(directory, "annotations.csv")
                 # Need to generalize this to handle different annotation file names and formats. For now, assuming a standard name.
-                convert_rectroi_csv_to_yolo(
+                convert_csv_to_yolo(
                     input_dir=directory,
                     csv_path=file_path,
                     output_dir=self.yolo_data,
@@ -384,7 +386,9 @@ class computerVision(QWidget):
             item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.CheckState.Checked)
             class_list.addItem(item)
-
+        
+        self.update_results_table()
+        self.ui.pushButton_4.setEnabled(True)  # Enable the training button after loading inputs
 
 
     def generate_yaml(self):
@@ -408,35 +412,34 @@ class computerVision(QWidget):
         print(f"Config generated at: {yaml_file}")
 
     
-    # def augmentation_strategy(self, method="default"):
-    #     import albumentations as A
+    def custom_augment(self, method="default"):
+        import albumentations as A
 
-    #     if method == "default":
-    #         self.transform = [
-    #             A.HorizontalFlip(p=0.5),
-    #             A.RandomBrightnessContrast(p=0.5),
-    #             A.Affine(
-    #                 scale=(0.8, 1.2),
-    #                 translate_percent=(-0.2, 0.2),
-    #                 rotate=(-15, 15),
-    #                 shear=(-10, 10),
-    #                 p=0.5            
-    #             ),
-    #             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.4),
-    #             A.GaussianBlur(blur_limit=(3, 5), p=0.3),
-    #         ]
+        if method == "default":
+            transform = [
+                A.HorizontalFlip(p=0.5),
+                A.RandomBrightnessContrast(p=0.5),
+                A.Affine(
+                    scale=(0.8, 1.2),
+                    translate_percent=(-0.2, 0.2),
+                    rotate=(-15, 15),
+                    shear=(-10, 10),
+                    p=0.5            
+                ),
+                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.4),
+                A.GaussianBlur(blur_limit=(3, 5), p=0.3),
+            ]
+            return transform
     #    elif method == "Auto"
 
 
     def run_training(self):
         from core import yolo_train
+        print(self.yolo_data)
         if self.yolo_data is None:
-            try:
-                # self.yolo_data = QFileDialog.getExistingDirectory(self, "Select YOLO Data Directory", os.getcwd())
-                self.yolo_data = r".\data\user_data\yolo_annotations"  # Hardcoded for now, can be changed to dynamic selection later.
-            except Exception as e:
-                print(f"No YOLO data directory provided: {e}")
-                return
+            print(f"No YOLO data directory provided.")
+            return
+        
 
         # Guard against starting a second training run while one is already in progress.
         existing_thread = getattr(self, "_training_thread", None)
@@ -444,21 +447,27 @@ class computerVision(QWidget):
             self.ui.textBrowser.append("--Training is already in progress--")
             return
 
-        self.proj_name = "ScanBound_YOLO_Training"
-        self.run_name = self.setupML_ui.lineEdit.text() if self.setupML_ui.lineEdit.text() else "rectroi_detector"
+        # self.project = "ScanBound_YOLO_Training"
+        # self.project = self.ui.lineEdit_2.text() if self.ui.lineEdit_2.text() else "yolo_training"
+        # self.name = self.setupML_ui.lineEdit.text() if self.setupML_ui.lineEdit.text() else "rectroi_detector"
         yolo_model = self.ui.comboBox_2.currentText() if self.ui.comboBox_2.currentText() else "yolo26n.pt"
         device_name = self.ui.comboBox_5.currentText() if self.ui.comboBox_5.currentText() else "cpu"
         epochs = int(self.ui.spinBox_4.value()) if self.ui.spinBox_4.value() else 50
         batch_size = int(self.ui.spinBox_5.value()) if self.ui.spinBox_5.value() else 16
+        
         if device_name == "gpu":
             device_name = "cuda"
-            # TODO: Add a check to see if CUDA is available, and if not, fall back to CPU with a warning.
+        if device_name == "cuda" and not torch.cuda.is_available():
+            print("CUDA is not available. Falling back to CPU.")
+            device_name = "cpu"
+
         augmentation_strategy = self.ui.comboBox_4.currentText().lower() if self.ui.comboBox_4.currentText() else "randaugment"
+        augmentations_custom = None
 
         if augmentation_strategy == "custom":
-            pass  # TODO: Implement custom augmentation strategy selection and handling.
-        elif augmentation_strategy == "disable augmentations":
-            augmentation_strategy = None  # Disable augmentations if selected.
+            augmentation_strategy = "none"  # Disable default augmentations if custom is selected.
+            augmentations_custom = self.custom_augment(method="default")
+
             
 
         self.ui.textBrowser.append(f"--Starting YOLO training with data from: {self.yolo_data}--")
@@ -484,19 +493,23 @@ class computerVision(QWidget):
         sys.stdout = Logger()
         # Set up the worker + thread. Keep references on self so they aren't
         # garbage collected while the thread is running.
+
         self._training_thread = QThread(self)
         self._training_worker = TrainingWorker(
             yolo_train_module=yolo_train,
             data_yaml_path=self.yolo_data + r"\dataset.yaml",
+            save_dir=self.yolo_data,
             model_weights=yolo_model,
             classes=list(selected_classes.keys()),
             epochs=epochs,
             batch_size=batch_size,
-            project_name=self.proj_name,
-            run_name=self.run_name,
+            project_name=self.project,
+            run_name=self.name,
             device=device_name, 
-            augmentations=augmentation_strategy
+            augmentations=augmentation_strategy,
+            augmentations_custom=augmentations_custom
         )
+
         self._training_worker.moveToThread(self._training_thread)
 
         self._training_thread.started.connect(self._training_worker.run)
@@ -515,27 +528,62 @@ class computerVision(QWidget):
     def populate_chart_selection(self):
         # Populate the chart selection combo box with available charts
         # results_dir = os.path.join(self.yolo_data, "runs", "detect")
-        results_dir = Path(r"C:\Users\wrja\Desktop\ScanBound\data\user_data\rectroi_detector-3")
-        image_names = [file.name for file in results_dir.iterdir() if file.suffix.lower() in self.image_extensions]
+        # results_dir = Path(r"C:\Users\wrja\Desktop\ScanBound\data\user_data\rectroi_detector-3")
+
+        if self.results_dir is None or not os.path.exists(self.results_dir):
+            print("Results directory not found. Please run training first.")
+            return
+        image_names = [file.name for file in self.results_dir.iterdir() if file.suffix.lower() in self.image_extensions]
 
         self.ui.comboBox.clear()
         self.ui.comboBox.addItems(image_names)
-        self.ui.comboBox_6.clear()
-        self.ui.comboBox_6.addItems(image_names)
         self.ui.comboBox_7.clear()
         self.ui.comboBox_7.addItems(image_names)
-        self.ui.comboBox_8.clear()
-        self.ui.comboBox_8.addItems(image_names)        
+       
 
     def update_displayed_chart(self, label, chart_path):
+        if self.results_dir is None or not os.path.exists(self.results_dir):
+            print("Results directory not found. Please run training first.")
+            return
         # Update the displayed chart in the given widget
-        results_dir = r"C:\Users\wrja\Desktop\ScanBound\data\user_data\rectroi_detector-3"
-        chart_name = os.path.join(results_dir, chart_path)
+        # results_dir = r"C:\Users\wrja\Desktop\ScanBound\data\user_data\rectroi_detector-3"
+        chart_name = os.path.join(self.results_dir, chart_path)
         pixmap = QtGui.QPixmap(chart_name)
         label.setPixmap(pixmap)
         label.setScaledContents(True)
         # self.setCentralWidget(label)
         # self.resize(pixmap.width(), pixmap.height())
+
+    def update_results_table(self):
+        self.ui.tableView.clearContents()
+        self.ui.tableView.setModel(None)
+
+        if not self.yolo_data:
+            return
+        
+        try:
+            results_path = os.path.join(self.yolo_data, "results.csv")
+        except Exception as e:
+            print(f"Error occurred while creating results path: {e}")
+            return
+
+        try:
+            results = pd.read_csv(results_path)
+        except (OSError, pd.errors.ParserError) as error:
+            print(f"Could not load results.csv: {error}")
+            return
+
+        model = QtGui.QStandardItemModel(self.ui.tableView)
+        model.setColumnCount(len(results.columns))
+        model.setHorizontalHeaderLabels([str(column) for column in results.columns])
+        for row in results.itertuples(index=False, name=None):
+            model.appendRow([
+                QtGui.QStandardItem("" if pd.isna(value) else str(value))
+                for value in row
+            ])
+
+        self.ui.tableView.setModel(model)
+        self.ui.tableView.resizeColumnsToContents()
         
     def _append_training_log(self, text):
         # Slot connected to EmittingStream.text_written. Runs on the main/UI
@@ -553,6 +601,7 @@ class computerVision(QWidget):
         self.ui.label_5.setText(f"Training completed.")
         self.ui.pushButton_4.setEnabled(True)
         self.populate_chart_selection()
+        self.update_results_table()
 
     def _on_training_error(self, error_message):
         self._restore_stdout()
@@ -579,7 +628,6 @@ class computerVision(QWidget):
 
         print("Packaged input files into a zip to run on a cuda-enabled machine. Saved at: data/user_data/prepared_yolo_files.zip")
 
-    
 
     def return_to_imageLabeling(self):
         """
