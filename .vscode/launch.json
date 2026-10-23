@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ScanBound app",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scanbound.app",
+      "python": "${workspaceFolder}/scanbound/.venv/Scripts/python.exe",
+      "args": ["example_images"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

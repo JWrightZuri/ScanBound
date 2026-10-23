@@ -1,31 +1,24 @@
-# ScanBound 
+# ScanBound
 
-An STM analysis tool for processing, visualizing, and labelling data.
+ScanBound is a scanning probe microscopy (STM / AFM) analysis tool: browse and process SPM data,
+annotate and detect nanostructures, measure them, and analyse surfaces. It runs on Windows, macOS
+and Linux.
 
-## ⚙️ Installation & Setup
+The app is in the [`scanbound`](scanbound) folder. See [scanbound/README.md](scanbound/README.md) for
+installing, running, troubleshooting and the Python API, and [scanbound/CHANGELOG.md](scanbound/CHANGELOG.md)
+for what changed in each version.
 
-Follow these steps for an easy install:
+## Install
 
-### 1. Clone the Repository or Download Zip
-git clone [https://github.com/JWrightZuri/ScanBound.git](https://github.com/JWrightZuri/ScanBound.git)
+- **Windows**: download `ScanBound-Setup-<version>.exe` from the
+  [latest release](https://github.com/JWrightZuri/ScanBound/releases/latest) and run it. No
+  administrator rights are needed.
+- **From source** (Windows, macOS, Linux, Python 3.10 or newer): clone or download this repository,
+  then run `scanbound\run_scanbound.bat` on Windows or `bash scanbound/run_scanbound.sh` on macOS and
+  Linux. The first run sets up its own Python environment.
 
-Alternatively, download the code as a zip file, and extract it somewhere on your machine.
+## Updates
 
-### 2. Perform the Automated Setup
-Run the setup script based on your operating system:
-
-Windows: Double-click **setup.bat** or run **.\setup.bat** in Terminal. 
-
-Mac/Linux: Run **chmod +x setup.sh** && **./setup.sh** in Terminal.
-
-This will create a python virtual environment (venv) containing all required packages.
-
-### 3. Run the Application
-Activate the python virtual environment:
-
-Windows: **.\venv\Scripts\activate** 
-
-Mac/Linux: **source venv/bin/activate**
-
-Run the main script with code:
-**python main.py**
+ScanBound checks for a new release when it starts and shows what changed. Installing it is optional,
+and an update never changes your projects, data or settings. **Help → Check for updates…** checks at
+any time.

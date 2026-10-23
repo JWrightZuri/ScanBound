@@ -1,2 +1,25 @@
-spm-venv/ 
+# The repository holds the rebuilt app only: the scanbound folder and the files listed here.
+# Anything else in this folder (the original program, data, example images, backups) stays on
+# disk but is not tracked.
+/*
+!/.gitignore
+!/README.md
+!/scanbound/
+!/.vscode/
+/.vscode/*
+!/.vscode/launch.json
+
+# built, installed or cached, never committed
+scanbound/.venv/
+scanbound/venv/
+scanbound/dist/
+scanbound/build/
+scanbound/packaging/windows/build/
+scanbound/packaging/windows/build.log
+*.egg-info/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+Thumbs.db
